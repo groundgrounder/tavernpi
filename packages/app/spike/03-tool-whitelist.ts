@@ -8,8 +8,7 @@
 //
 // typebox：ToolDefinition.parameters 是 typebox TSchema（extensions/types.ts:449-462），
 //   运行期即 JSON Schema 对象，pi 侧按 json_schema 做 constrained sampling（ai/constrained-sampling.ts）。
-//   本 spike 从 pi 依赖里导入 typebox（1.3.7，ESM-only），不额外声明 app 依赖。
-//   导入路径经由 node_modules 嵌套布局解析（类型声明走同目录 .d.mts）。
+//   typebox 已作为 @tavernpi/app 的显式依赖（1.3.7，与 pi 嵌套版本对齐），此处正常导入。
 
 import {
 	createAgentSession,
@@ -18,7 +17,7 @@ import {
 	getAgentDir,
 	SessionManager,
 } from "@earendil-works/pi-coding-agent";
-import { Type } from "../../../node_modules/@earendil-works/pi-coding-agent/node_modules/typebox/build/index.mjs";
+import { Type } from "typebox";
 
 const SYSTEM_PROMPT = `你是 tavernpi 故事引擎的叙事执笔者，把玩家行动转化为叙事事件并记录到事件存储。
 

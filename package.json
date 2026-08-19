@@ -10,7 +10,13 @@
     "node": ">=24"
   },
   "scripts": {
-    "spike:m0": "node packages/app/spike/01-hello.ts",
+    "spike:m0": "node packages/app/spike/08-m0-demo.ts",
+    "spike:01": "node packages/app/spike/01-hello.ts",
+    "spike:02": "node packages/app/spike/02-resource-takeover.ts",
+    "spike:03": "node packages/app/spike/03-tool-whitelist.ts",
+    "spike:04": "node packages/app/spike/04-parallel-memory.ts",
+    "spike:05": "node packages/app/spike/05-navigate-tree.ts",
+    "spike:07": "node packages/app/spike/07-compaction.ts",
     "typecheck": "tsc -p packages/core/tsconfig.json && tsc -p packages/app/tsconfig.json"
   },
   "devDependencies": {
