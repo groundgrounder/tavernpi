@@ -1,0 +1,19 @@
+# BEGIN oh-my-opencode-slim clonedeps
+.slim/clonedeps/repos/
+# END oh-my-opencode-slim clonedeps
+
+# Node
+node_modules/
+dist/
+*.log
+
+# 密钥与本地配置（永不入库）
+.env
+.env.*
+auth.json
+
+# 本地故事数据/快照（运行时产物在 ~/.tavernpi，此处防 spike 临时文件入库）
+*.db
+*.db-journal
+*.db-wal
+*.db-shm

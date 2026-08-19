@@ -1,0 +1,42 @@
+{
+  "version": "1.0.0",
+  "updatedAt": "2026-08-19T00:00:00.000Z",
+  "dependencies": [
+    {
+      "name": "@earendil-works/pi-coding-agent",
+      "resolvedVersion": "0.84.2",
+      "repoUrl": "https://github.com/earendil-works/pi.git",
+      "ref": "v0.84.2",
+      "path": ".slim/clonedeps/repos/earendil-works__pi",
+      "packagePath": "packages/coding-agent",
+      "reason": "harness 基座：SDK 资源接管、工具白名单、extension、compaction 定制点的源码核实"
+    },
+    {
+      "name": "@earendil-works/pi-agent-core",
+      "resolvedVersion": "0.84.2",
+      "repoUrl": "https://github.com/earendil-works/pi.git",
+      "ref": "v0.84.2",
+      "path": ".slim/clonedeps/repos/earendil-works__pi",
+      "packagePath": "packages/agent",
+      "reason": "createAgentSession / SessionManager.inMemory / createAgentSessionRuntime / navigateTree 语义核实"
+    },
+    {
+      "name": "@earendil-works/pi-ai",
+      "resolvedVersion": "0.84.2",
+      "repoUrl": "https://github.com/earendil-works/pi.git",
+      "ref": "v0.84.2",
+      "path": ".slim/clonedeps/repos/earendil-works__pi",
+      "packagePath": "packages/ai",
+      "reason": "provider/model 管理与结构化输出机制核实"
+    },
+    {
+      "name": "@earendil-works/pi-tui",
+      "resolvedVersion": "0.84.2",
+      "repoUrl": "https://github.com/earendil-works/pi.git",
+      "ref": "v0.84.2",
+      "path": ".slim/clonedeps/repos/earendil-works__pi",
+      "packagePath": "packages/tui",
+      "reason": "TUI 组件能力与渲染能力（stylize 乐观呈现开放问题）核实"
+    }
+  ]
+}
