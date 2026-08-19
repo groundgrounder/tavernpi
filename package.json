@@ -18,7 +18,8 @@
     "spike:05": "node packages/app/spike/05-navigate-tree.ts",
     "spike:06": "node packages/app/spike/06-sqlite-backup.ts",
     "spike:07": "node packages/app/spike/07-compaction.ts",
-    "typecheck": "tsc -p packages/core/tsconfig.json && tsc -p packages/app/tsconfig.json"
+    "typecheck": "tsc -p packages/core/tsconfig.json && tsc -p packages/app/tsconfig.json",
+    "test": "node --test \"packages/core/test/**/*.test.ts\""
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
