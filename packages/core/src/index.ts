@@ -1,5 +1,5 @@
 // tavernpi-core 对外导出收敛（创作规划 §10.2 API 承诺面的源头）。
-// M1-P1：故事 DB 层。
+// M1-P1：故事 DB 层；M1-P2：快照管理器（§3.1 ★承重机制）。
 
 export const CORE_VERSION = "0.0.0";
 
@@ -37,3 +37,23 @@ export {
 	type TurnLogRow,
 	type WorldStateRow,
 } from "./db/types.ts";
+
+// 快照管理器（§3.1 ★）
+export {
+	openSnapshotsDb,
+	snapshotsDbPath,
+	takeSnapshot,
+	SnapshotsDb,
+	type SnapshotRecord,
+} from "./snapshot/snapshots-db.ts";
+export { removeWalFiles, resetToEmptyStoryDb, restoreSnapshot } from "./snapshot/restore.ts";
+export { buildAncestorChain, type EntryLike } from "./snapshot/ancestors.ts";
+export {
+	createSnapshotHooks,
+	type PendingRestore,
+	type SnapshotHooks,
+	type SnapshotHooksOptions,
+	type SnapshotHookState,
+	type SnapshotRestoreResult,
+} from "./snapshot/hooks.ts";
+export { forkStoryDb, type ForkResult } from "./snapshot/fork.ts";
