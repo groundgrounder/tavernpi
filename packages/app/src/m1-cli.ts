@@ -6,7 +6,8 @@
 //     ↔ StoryDb（story.db，openStoryDb + turn_seq 纪律写者）
 //     ↔ SnapshotsDb（snapshots.db，takeSnapshot/findNearestSnapshot）
 //     ↔ createSnapshotHooks（挂 session_before_tree / session_tree，导航即原子恢复）
-//     ↔ createDbTools（get_clock/query_events/get_npc/write_event/advance_clock 白名单）。
+//     ↔ createDbTools（get_clock/query_events/get_npc/write_event/advance_clock 白名单）
+//     ↔ InteractionBroker（§6.7 轮中交互：readline handler + combat_check 演示工具，仅交互模式注册）。
 //
 // 关键接线决策：
 // 1. 快照绑定本轮结束时的 leaf（最终 assistant entry），与 turn_log 同一 id。pi navigateTree
@@ -32,25 +33,32 @@
 
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { createInterface } from "node:readline/promises";
+import { createInterface } from "node:readline";
+import type { Interface } from "node:readline";
 import {
 	createAgentSession,
 	DefaultResourceLoader,
+	defineTool,
 	getAgentDir,
 	SessionManager,
 } from "@earendil-works/pi-coding-agent";
-import type { AgentSession, ExtensionAPI, SessionEntry } from "@earendil-works/pi-coding-agent";
+import type { AgentSession, ExtensionAPI, SessionEntry, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 import {
 	buildAncestorChain,
 	createDbTools,
 	createSnapshotHooks,
 	defaultStoriesRoot,
 	forkStoryDb,
+	InteractionBroker,
+	InteractionUnavailableError,
+	judgeCombat,
 	openSnapshotsDb,
 	openStoryDb,
 	snapshotsDbPath,
 	storyDbPath as coreStoryDbPath,
 	takeSnapshot,
+	type InteractionRequest,
 	type SnapshotHooks,
 	type SnapshotRestoreResult,
 	type SnapshotsDb,
@@ -107,6 +115,11 @@ export interface M1RuntimeOptions {
 	sessionManager: SessionManager;
 	storyState: M1StoryState;
 	onWarning?: (message: string) => void;
+	/**
+	 * 轮中交互（§6.7）：传 InteractionBroker 则注册 combat_check 演示工具并加入白名单。
+	 * 脚本/验收模式（m1:accept）缺省不传——白名单保持既有 5 工具，验收 30 项断言不受影响。
+	 */
+	interaction?: InteractionBroker;
 }
 
 /** 一次完整接线运行态（fork 后重建新实例）。 */
@@ -223,7 +236,7 @@ function resolveTreeTarget(sessionManager: SessionManager, arg: string): Extract
  * 写工具经 getter 代理命中「当前」storyDb（恢复替换实例后仍然有效）。
  */
 export async function buildM1Runtime(options: M1RuntimeOptions): Promise<M1Runtime> {
-	const { cwd, sessionManager, storyState, onWarning } = options;
+	const { cwd, sessionManager, storyState, onWarning, interaction } = options;
 	let turnSeq = computeNextTurnSeq(storyState.storyDb);
 
 	const hooks = createSnapshotHooks({
@@ -265,14 +278,20 @@ export async function buildM1Runtime(options: M1RuntimeOptions): Promise<M1Runti
 
 	// 写工具经 getter 命中「当前」storyDb（core createDbTools 支持 StoryDb | (() => StoryDb)）：
 	// 恢复会用新 StoryDb 实例原子替换，getter 保证工具链在恢复后仍然有效，无需重建会话。
-	const tools = createDbTools(() => storyState.storyDb, { getCurrentTurnSeq: () => turnSeq });
+	const customTools = createDbTools(() => storyState.storyDb, { getCurrentTurnSeq: () => turnSeq });
+	const toolNames: string[] = [...DB_TOOL_NAMES];
+	// 轮中交互（§6.7）：仅交互模式注册 combat_check（验收脚本共享本构建块，但白名单保持在 5 工具）。
+	if (interaction !== undefined) {
+		customTools.push(createCombatCheckTool(interaction));
+		toolNames.push("combat_check");
+	}
 
 	const { session, modelFallbackMessage } = await createAgentSession({
 		cwd,
 		sessionManager,
 		resourceLoader: loader,
-		customTools: tools,
-		tools: [...DB_TOOL_NAMES],
+		customTools,
+		tools: toolNames,
 	});
 	if (modelFallbackMessage) {
 		console.warn(`[warn] ${modelFallbackMessage}`);
@@ -353,6 +372,160 @@ export async function navigateToEntry(runtime: M1Runtime, targetId: string): Pro
 }
 
 // ---------------------------------------------------------------------------
+// 轮中交互（§6.7）：combat_check 演示工具 + readline handler
+// ---------------------------------------------------------------------------
+
+/**
+ * 行队列读取器：用 node:readline 的 'line' 事件把 stdin 逐行入队，读取侧按需取。
+ * 选型原因：readline/promises 的 question() 在 stdin EOF 时立即抛 ERR_USE_AFTER_CLOSE
+ * （'close' 在流结束后立刻触发，缓冲行会丢失）——脚本化管道输入（printf 喂多行）不可靠。
+ * 而 'line' 事件在 EOF 前对所有缓冲行都会触发：先入队，读取侧再按序消费，天然确定。
+ */
+class LineQueue {
+	private readonly lines: string[] = [];
+	private readonly waiters: Array<(line: string) => void> = [];
+	private eof = false;
+
+	constructor(rl: Interface) {
+		rl.on("line", (line) => {
+			const waiter = this.waiters.shift();
+			if (waiter) waiter(line);
+			else this.lines.push(line);
+		});
+		rl.on("close", () => {
+			this.eof = true;
+			const waiter = this.waiters.shift();
+			if (waiter) waiter(""); // EOF 哨兵：让等待方以空行退出/失败
+		});
+	}
+
+	/** 取下一行（打印 prompt 后等待；EOF 后返回空串）。 */
+	async nextLine(prompt: string): Promise<string> {
+		process.stdout.write(prompt);
+		if (this.lines.length > 0) return this.lines.shift()!;
+		if (this.eof) return "";
+		return new Promise<string>((resolve) => {
+			this.waiters.push(resolve);
+		});
+	}
+}
+
+const COMBAT_OPTIONS = ["稳扎稳打", "冒险突进", "伺机闪避"] as const;
+
+/**
+ * combat_check 演示工具：发起一次 choice + 一次 confirm 轮中交互，按确定性规则
+ * （core judgeCombat）算出 success/partial/failure 与叙事提示。交互不可用（无 UI handler）
+ * 时按默认谨慎分支降级（§6.7 降级契约），不崩溃。
+ */
+function createCombatCheckTool(broker: InteractionBroker): ToolDefinition {
+	const choiceSchema = Type.Object({ option: Type.Integer({ description: "选中项序号（0 基）" }) });
+	const confirmSchema = Type.Object({ confirmed: Type.Boolean() });
+	return defineTool({
+		name: "combat_check",
+		label: "战斗判定",
+		description:
+			"战斗/危险行动需要判定时调用：向玩家发起行动方式选择与全力一搏确认的轮中交互，按判定规则返回 success/partial/failure 与叙事提示文本。交互不可用（无 UI handler）时自动按默认谨慎分支降级。",
+		parameters: Type.Object(
+			{
+				action: Type.String({ description: "行动描述" }),
+				difficulty: Type.Union(
+					[Type.Literal("easy"), Type.Literal("normal"), Type.Literal("hard")],
+					{ description: "难度：easy/normal/hard" },
+				),
+			},
+			{ additionalProperties: false },
+		),
+		execute: async (_toolCallId, params) => {
+			const base = { action: params.action, difficulty: params.difficulty };
+			try {
+				const choice = await broker.request({
+					kind: "choice",
+					prompt: `战斗判定「${params.action}」（难度 ${params.difficulty}）：选择行动方式`,
+					payload: { options: [...COMBAT_OPTIONS] },
+					responseSchema: choiceSchema,
+					timeoutMs: 120_000,
+				});
+				const confirm = await broker.request({
+					kind: "confirm",
+					prompt: "是否全力一搏？",
+					responseSchema: confirmSchema,
+					timeoutMs: 120_000,
+				});
+				const judgement = judgeCombat({
+					difficulty: params.difficulty,
+					choiceOption: choice.option,
+					allIn: confirm.confirmed,
+				});
+				const optionName = COMBAT_OPTIONS[choice.option] ?? "?";
+				const allInText = confirm.confirmed ? "，并全力一搏" : "";
+				return {
+					content: [
+						{
+							type: "text",
+							text: `战斗判定结果: ${judgement.outcome}（选择「${optionName}」${allInText}，得分 ${judgement.score}）——${judgement.hint}`,
+						},
+					],
+					details: {
+						...base,
+						choiceOption: choice.option,
+						allIn: confirm.confirmed,
+						...judgement,
+						degraded: false,
+					},
+				};
+			} catch (err) {
+				if (err instanceof InteractionUnavailableError) {
+					// 降级契约（§6.7）：无 UI handler 时按默认谨慎分支返回，不崩溃、不挂死。
+					const judgement = judgeCombat({ difficulty: params.difficulty, choiceOption: 0, allIn: false });
+					return {
+						content: [
+							{
+								type: "text",
+								text: `（交互不可用，按默认谨慎分支降级）战斗判定结果: ${judgement.outcome}（稳扎稳打，得分 ${judgement.score}）——${judgement.hint}`,
+							},
+						],
+						details: { ...base, choiceOption: 0, allIn: false, ...judgement, degraded: true },
+					};
+				}
+				throw err;
+			}
+		},
+	});
+}
+
+/** readline 交互 handler（三种内置 kind；未知 kind 抛错，让工具降级路径可见）。 */
+async function readlineInteractionHandler(req: InteractionRequest, queue: LineQueue): Promise<unknown> {
+	switch (req.kind) {
+		case "confirm": {
+			const answer = (await queue.nextLine(`${req.prompt}（y/n）> `)).trim().toLowerCase();
+			if (answer === "y" || answer === "yes") return { confirmed: true };
+			if (answer === "n" || answer === "no") return { confirmed: false };
+			throw new Error(`非法确认输入: ${JSON.stringify(answer)}（应为 y/n）`);
+		}
+		case "choice": {
+			const options = ((req.payload ?? {}) as { options?: unknown }).options;
+			if (!Array.isArray(options) || options.length === 0 || !options.every((o) => typeof o === "string")) {
+				throw new Error("choice 交互缺合法 payload.options（string[]）");
+			}
+			console.log(req.prompt);
+			options.forEach((opt, i) => console.log(`  [${i + 1}] ${opt}`));
+			const line = (await queue.nextLine("> ")).trim();
+			const idx = Number(line) - 1;
+			if (!Number.isInteger(idx) || idx < 0 || idx >= options.length) {
+				throw new Error(`非法选项序号: ${JSON.stringify(line)}（应为 1-${options.length}）`);
+			}
+			return { option: idx };
+		}
+		case "text": {
+			const line = (await queue.nextLine(`${req.prompt}> `)).trim();
+			return { text: line };
+		}
+		default:
+			throw new Error(`未知交互 kind: ${req.kind}（内置 confirm/choice/text；卡包自定义 包名:kind）`);
+	}
+}
+
+// ---------------------------------------------------------------------------
 // CLI 命令
 // ---------------------------------------------------------------------------
 
@@ -407,6 +580,9 @@ function printHelp(): void {
 			"  /status             打印 sessionId / leafId / clock / 行数",
 			"  /help               本帮助",
 			"  空行                退出（不删故事目录，可 --resume 续写）",
+			"",
+			"轮中交互（§6.7）：模型发起战斗/危险判定时调用 combat_check，会在终端向你提问",
+			"（选择行动方式 + 是否全力一搏）；输入对应序号与 y/n 即可，判定结果进入本轮叙事。",
 		].join("\n"),
 	);
 }
@@ -557,29 +733,27 @@ export async function main(argv: readonly string[]): Promise<void> {
 	console.log(`> session file: ${sessionManager.getSessionFile()}`);
 	console.log(`> storyDir: ${storyState.storyDir}`);
 
+	const rl = createInterface({ input: process.stdin, output: process.stdout });
+	const queue = new LineQueue(rl);
+
+	// 轮中交互（§6.7）：注册 readline handler（confirm/choice/text），演示工具 combat_check
+	// 仅交互模式注册（验收脚本缺省不传 interaction，白名单保持 5 工具）。
+	const broker = new InteractionBroker();
+	broker.registerHandler((req) => readlineInteractionHandler(req, queue));
+
 	let runtime = await buildM1Runtime({
 		cwd,
 		sessionManager,
 		storyState,
 		onWarning: (m) => console.warn(`[warn] ${m}`),
+		interaction: broker,
 	});
 	console.log(`> 工具白名单: [${runtime.session.getActiveToolNames().join(", ")}]`);
 
-	const rl = createInterface({ input: process.stdin, output: process.stdout });
-	let inputClosed = false;
-	rl.on("close", () => {
-		inputClosed = true;
-	});
 	console.log("\n输入行动/对话开始叙事；斜杠命令见 /help；空行退出。");
 	try {
 		for (;;) {
-			if (inputClosed) break;
-			let line: string;
-			try {
-				line = (await rl.question("> ")).trim();
-			} catch {
-				break; // 输入流已结束（EOF/被关闭），正常退出
-			}
+			const line = (await queue.nextLine("> ")).trim();
 			if (line === "") break;
 			if (line.startsWith("/")) {
 				const next = await runCommand(line, runtime, { storiesRoot, cwd });

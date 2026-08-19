@@ -64,3 +64,20 @@ export {
 	type SnapshotRestoreResult,
 } from "./snapshot/hooks.ts";
 export { forkStoryDb, type ForkResult } from "./snapshot/fork.ts";
+
+// 轮中交互通道（§6.7）
+export {
+	InteractionBroker,
+	InteractionUnavailableError,
+	InteractionValidationError,
+	InteractionTimeoutError,
+	judgeCombat,
+} from "./interaction/index.ts";
+export type {
+	CombatDifficulty,
+	CombatJudgement,
+	CombatJudgementInput,
+	CombatOutcome,
+	InteractionHandler,
+	InteractionRequest,
+} from "./interaction/index.ts";
