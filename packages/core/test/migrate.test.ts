@@ -7,19 +7,19 @@ import { DatabaseSync } from "node:sqlite";
 import { cleanupTempDir, makeTempDir } from "./helpers.ts";
 import { CORE_MIGRATIONS, hasMigration, migrate, type Migration } from "../src/db/migrate.ts";
 
-test("migrate 首次应用 v1_core_schema，重复调用幂等（无副作用、返回空）", () => {
+test("migrate 首次应用 v1 + v2，重复调用幂等（无副作用、返回空）", () => {
 	const dir = makeTempDir();
 	const dbPath = join(dir, "story.db");
 	const db = new DatabaseSync(dbPath);
 	try {
 		const first = migrate(db);
-		assert.deepEqual(first, ["v1_core_schema"]);
+		assert.deepEqual(first, ["v1_core_schema", "v2_spatial_primitives"]);
 
 		// 幂等：二次调用不再执行任何迁移
 		const second = migrate(db);
 		assert.deepEqual(second, []);
 
-		// v1 后 §5.1 全量表存在
+		// v2 后 §5.1 全量表存在（含空间基元）
 		const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map(
 			(r) => r.name,
 		);
@@ -36,9 +36,16 @@ test("migrate 首次应用 v1_core_schema，重复调用幂等（无副作用、
 			"npc_relations",
 			"turn_log",
 			"directives",
+			"locations",
+			"location_log",
 		]) {
 			assert.ok(tables.includes(t), `表 ${t} 应存在`);
 		}
+		// v2 旧表补列
+		const npcCols = (db.prepare("PRAGMA table_info(npcs)").all() as Array<{ name: string }>).map((c) => c.name);
+		assert.ok(npcCols.includes("current_location"), "npcs.current_location 应存在");
+		const eventCols = (db.prepare("PRAGMA table_info(events)").all() as Array<{ name: string }>).map((c) => c.name);
+		assert.ok(eventCols.includes("location_id"), "events.location_id 应存在");
 		// snapshots 不在 story.db（§3.1：独立 snapshots.db）
 		assert.ok(!tables.includes("snapshots"), "snapshots 表不应存在于 story.db");
 	} finally {
@@ -56,7 +63,7 @@ test("migrate 注册额外命名迁移：仅执行未应用的，且顺序在 co
 			up: (d) => d.exec("CREATE TABLE IF NOT EXISTS card_pack_v1 (id INTEGER PRIMARY KEY, note TEXT)"),
 		};
 		const applied = migrate(db, [extra]);
-		assert.deepEqual(applied, ["v1_core_schema", "card_pack_v1"]);
+		assert.deepEqual(applied, ["v1_core_schema", "v2_spatial_primitives", "card_pack_v1"]);
 		assert.ok(hasMigration(db, "card_pack_v1"));
 
 		// 再次执行（含同额外迁移）不再应用任何

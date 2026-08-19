@@ -25,8 +25,12 @@ export { createDbTools, type DbToolsOptions } from "./db/tools.ts";
 // 行类型与常量
 export {
 	DEFAULT_STORY_CLOCK,
+	PLAYER_LOCATION_KEY,
+	parseLocationId,
 	type DirectiveRow,
 	type EventRow,
+	type LocationLogRow,
+	type LocationRow,
 	type NpcMemoryRow,
 	type NpcRelationRow,
 	type NpcRow,
@@ -37,6 +41,9 @@ export {
 	type TurnLogRow,
 	type WorldStateRow,
 } from "./db/types.ts";
+
+// schema 常量（迁移测试/卡包工具可用）
+export { CORE_SCHEMA_SQL, CORE_V2_ALTERS, CORE_V2_SPATIAL_SQL } from "./db/schema.ts";
 
 // 快照管理器（§3.1 ★）
 export {

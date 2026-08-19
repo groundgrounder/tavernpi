@@ -16,14 +16,14 @@ function openTempStory(dir: string) {
 	return openStoryDb(join(dir, "story.db"));
 }
 
-test("工具集构成：5 个工具、白名单可用", () => {
+test("工具集构成：7 个工具、白名单可用", () => {
 	const dir = makeTempDir();
 	try {
 		const story = openTempStory(dir);
 		const tools = createDbTools(story);
 		assert.deepEqual(
 			tools.map((t) => t.name),
-			["get_clock", "query_events", "get_npc", "write_event", "advance_clock"],
+			["get_clock", "query_events", "get_npc", "write_event", "advance_clock", "get_location", "move_to"],
 		);
 		story.close();
 	} finally {

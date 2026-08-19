@@ -2,7 +2,22 @@
 // 按后续 pipeline 需要：clock 读取、turn_seq 范围查询、全表读、NPC 复合读。
 
 import { DatabaseSync } from "node:sqlite";
-import type { DirectiveRow, EventRow, NpcMemoryRow, NpcRelationRow, NpcRow, NpcTraitRow, PhaseRow, StoryClock, TimeLogRow, TurnLogRow, WorldStateRow } from "./types.ts";
+import { PLAYER_LOCATION_KEY } from "./types.ts";
+import type {
+	DirectiveRow,
+	EventRow,
+	LocationLogRow,
+	LocationRow,
+	NpcMemoryRow,
+	NpcRelationRow,
+	NpcRow,
+	NpcTraitRow,
+	PhaseRow,
+	StoryClock,
+	TimeLogRow,
+	TurnLogRow,
+	WorldStateRow,
+} from "./types.ts";
 
 export interface NpcComposite {
 	npc: NpcRow | undefined;
@@ -65,7 +80,7 @@ export class DbReader {
 		const where = clauses.length > 0 ? ` WHERE ${clauses.join(" AND ")}` : "";
 		return this.db
 			.prepare(
-				`SELECT id, turn_seq, story_time, type, summary, detail, participants, location, created_entry_id
+				`SELECT id, turn_seq, story_time, type, summary, detail, participants, location, location_id, created_entry_id
 				 FROM events${where} ORDER BY id`,
 			)
 			.all(...params) as unknown as EventRow[];
@@ -84,19 +99,76 @@ export class DbReader {
 	}
 
 	// ------------------------------------------------------------------
+	// 空间基元（§5.1 locations / location_log）
+	// ------------------------------------------------------------------
+
+	/** 地点注册表全表读（按 id 升序；parent 名已解析）。 */
+	listLocations(): LocationRow[] {
+		return this.db
+			.prepare(
+				`SELECT l.id, l.name, l.parent_id, l.detail, p.name AS parent_name
+				 FROM locations l LEFT JOIN locations p ON p.id = l.parent_id ORDER BY l.id`,
+			)
+			.all() as unknown as LocationRow[];
+	}
+
+	/** 单个地点（含 parent 名解析）；未登记返回 undefined。 */
+	getLocation(id: number): LocationRow | undefined {
+		return this.db
+			.prepare(
+				`SELECT l.id, l.name, l.parent_id, l.detail, p.name AS parent_name
+				 FROM locations l LEFT JOIN locations p ON p.id = l.parent_id WHERE l.id = ?`,
+			)
+			.get(id) as LocationRow | undefined;
+	}
+
+	/** 玩家当前位置（读 world_state 约定键 player_location 并解析为地点行）；未定位返回 undefined。 */
+	getPlayerLocation(): LocationRow | undefined {
+		const ws = this.db.prepare("SELECT value FROM world_state WHERE key = ?").get(PLAYER_LOCATION_KEY) as
+			| { value: string }
+			| undefined;
+		if (!ws) return undefined;
+		const n = Number(ws.value);
+		const id = Number.isInteger(n) && n >= 0 ? n : null;
+		return id === null ? undefined : this.getLocation(id);
+	}
+
+	/** 位置变更记录（按 turn_seq 倒序，最近在前；地点名已解析）。 */
+	listLocationLog(limit = 20): LocationLogRow[] {
+		return this.db
+			.prepare(
+				`SELECT ll.turn_seq, ll.subject, ll.from_location, ll.to_location, ll.note,
+				        fl.name AS from_location_name, tl.name AS to_location_name
+				 FROM location_log ll
+				 LEFT JOIN locations fl ON fl.id = ll.from_location
+				 LEFT JOIN locations tl ON tl.id = ll.to_location
+				 ORDER BY ll.turn_seq DESC, ll.rowid DESC LIMIT ?`,
+			)
+			.all(limit) as unknown as LocationLogRow[];
+	}
+
+	// ------------------------------------------------------------------
 	// NPC
 	// ------------------------------------------------------------------
 
-	/** NPC 全表读（按 id 升序）。 */
+	/** NPC 全表读（按 id 升序；current_location 名已解析）。 */
 	listNpcs(): NpcRow[] {
-		return this.db.prepare("SELECT id, name, card_ref, status FROM npcs ORDER BY id").all() as unknown as NpcRow[];
+		return this.db
+			.prepare(
+				`SELECT n.id, n.name, n.card_ref, n.status, n.current_location, loc.name AS current_location_name
+				 FROM npcs n LEFT JOIN locations loc ON loc.id = n.current_location ORDER BY n.id`,
+			)
+			.all() as unknown as NpcRow[];
 	}
 
-	/** NPC 复合读：基本信息 + 特征 + 记忆（按 salience 降序）+ 关系（双向）。 */
+	/** NPC 复合读：基本信息（含当前位置）+ 特征 + 记忆（按 salience 降序）+ 关系（双向）。 */
 	getNpc(npcId: number): NpcComposite {
-		const npc = this.db.prepare("SELECT id, name, card_ref, status FROM npcs WHERE id = ?").get(npcId) as
-			| NpcRow
-			| undefined;
+		const npc = this.db
+			.prepare(
+				`SELECT n.id, n.name, n.card_ref, n.status, n.current_location, loc.name AS current_location_name
+				 FROM npcs n LEFT JOIN locations loc ON loc.id = n.current_location WHERE n.id = ?`,
+			)
+			.get(npcId) as NpcRow | undefined;
 		const traits = this.db
 			.prepare("SELECT npc_id, trait, weight, source, turn_seq FROM npc_traits WHERE npc_id = ? ORDER BY turn_seq")
 			.all(npcId) as unknown as NpcTraitRow[];

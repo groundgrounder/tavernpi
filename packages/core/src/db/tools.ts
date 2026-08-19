@@ -10,6 +10,7 @@ import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent
 import { Type } from "typebox";
 import type { NpcComposite } from "./reader.ts";
 import type { StoryDb } from "./story-db.ts";
+import type { LocationRow } from "./types.ts";
 
 export interface DbToolsOptions {
 	/** 当前轮次提供器。必注入（M2 起由编排器提供）；缺省时写入工具执行抛错。 */
@@ -26,6 +27,40 @@ function requireTurnSeq(getCurrentTurnSeq: (() => number) | undefined): number {
 		);
 	}
 	return getCurrentTurnSeq();
+}
+
+/** 渲染 locations 为缩进树（按 parent_id 递归；root = parent_id 为 null 的条目）。 */
+function renderLocationTree(locations: LocationRow[]): string[] {
+	const children = new Map<number | null, LocationRow[]>();
+	for (const loc of locations) {
+		const list = children.get(loc.parent_id) ?? [];
+		list.push(loc);
+		children.set(loc.parent_id, list);
+	}
+	const lines: string[] = [];
+	const walk = (parent: number | null, depth: number): void => {
+		for (const loc of children.get(parent) ?? []) {
+			lines.push(`${"  ".repeat(depth)}#${loc.id} ${loc.name}`);
+			walk(loc.id, depth + 1);
+		}
+	};
+	walk(null, 0);
+	return lines;
+}
+
+/** 渲染地点名路径（如 王城 > 庭院）+ 地点 id。 */
+function renderLocationPath(location: LocationRow, locations: LocationRow[]): string {
+	const byId = new Map<number, LocationRow>();
+	for (const loc of locations) byId.set(loc.id, loc);
+	const names: string[] = [location.name];
+	let cur: LocationRow = location;
+	while (cur.parent_id !== null) {
+		const parent = byId.get(cur.parent_id);
+		if (!parent) break;
+		names.unshift(parent.name);
+		cur = parent;
+	}
+	return `${names.join(" > ")}（地点 #${location.id}）`;
 }
 
 /** 为指定 storyDb 创建 db 工具集。
@@ -96,8 +131,9 @@ export function createDbTools(storyDb: StoryDb | (() => StoryDb), options: DbToo
 			const relationsText = relations
 				.map((r) => `${r.npc_a}↔${r.npc_b}=${r.disposition}`)
 				.join(", ") || "(无)";
+			const locationText = npc.current_location !== null ? `#${npc.current_location} ${npc.current_location_name ?? "?"}` : "(未定位)";
 			const text =
-				`NPC #${npc.id} ${npc.name}（status: ${npc.status}）\n` +
+				`NPC #${npc.id} ${npc.name}（status: ${npc.status}，位置: ${locationText}）\n` +
 				`特征: ${traitsText}\n记忆: ${memoriesText}\n关系: ${relationsText}`;
 			return { content: [{ type: "text", text }], details: { npc, traits, memories, relations } };
 		},
@@ -168,5 +204,52 @@ export function createDbTools(storyDb: StoryDb | (() => StoryDb), options: DbToo
 		},
 	});
 
-	return [getClockTool, queryEventsTool, getNpcTool, writeEventTool, advanceClockTool];
+	const getLocationTool = defineTool({
+		name: "get_location",
+		label: "读取地点与玩家位置",
+		description:
+			"返回玩家当前所在地（含父地点链，如 王城 > 庭院）与 locations 注册表的地点树摘要（含各地点 id）。调用 move_to 之前必须先经本工具查询 location_id，不得编造或猜测地点 id。",
+		parameters: EMPTY_PARAMS,
+		execute: async () => {
+			const storyDb = getStoryDb();
+			const locations = storyDb.reader.listLocations();
+			const player = storyDb.reader.getPlayerLocation();
+			const playerText = player ? renderLocationPath(player, locations) : "(玩家尚未定位)";
+			const treeLines = renderLocationTree(locations);
+			const text = `当前玩家位置: ${playerText}\n地点注册表:\n${treeLines.length === 0 ? "(空)" : treeLines.join("\n")}`;
+			return { content: [{ type: "text", text }], details: { player: player ?? null, locations } };
+		},
+	});
+
+	const moveToTool = defineTool({
+		name: "move_to",
+		label: "移动玩家",
+		description:
+			"把玩家移动到指定地点。location_id 必须先经 get_location 查询取得，不得编造；未登记的地点会被拒绝。移动会写入 location_log（from→to）并更新玩家位置。",
+		parameters: Type.Object(
+			{
+				location_id: Type.Integer({ description: "目标地点 id（必须先经 get_location 查询，不得编造）" }),
+				note: Type.Optional(Type.String({ description: "移动说明（可空）" })),
+			},
+			{ additionalProperties: false },
+		),
+		execute: async (_toolCallId, params) => {
+			// 走强制写入 API（DbWriter.moveSubject，subject='player'）—— 登记校验与 location_log 由 DB 层保证。
+			const storyDb = getStoryDb();
+			const row = storyDb.writer.moveSubject({
+				turnSeq: requireTurnSeq(getTurnSeq),
+				subject: "player",
+				toLocationId: params.location_id,
+				note: params.note,
+			});
+			const fromText = row.from_location === null ? "(未定位)" : `#${row.from_location} ${row.from_location_name ?? ""}`;
+			const toText = `#${row.to_location} ${row.to_location_name ?? ""}`;
+			return {
+				content: [{ type: "text", text: `玩家已移动: ${fromText} → ${toText}（轮次 ${row.turn_seq}）` }],
+				details: row,
+			};
+		},
+	});
+
+	return [getClockTool, queryEventsTool, getNpcTool, writeEventTool, advanceClockTool, getLocationTool, moveToTool];
 }

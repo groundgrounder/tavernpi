@@ -4,7 +4,23 @@
 // - clock 是唯一例外（upsertClock 单例，不带 turn_seq，历史走 time_log）。
 
 import { DatabaseSync } from "node:sqlite";
-import { DEFAULT_STORY_CLOCK, type DirectiveRow, type EventRow, type NpcMemoryRow, type NpcRelationRow, type NpcRow, type NpcTraitRow, type PhaseRow, type StoryClock, type TimeLogRow, type TurnLogRow, type WorldStateRow } from "./types.ts";
+import {
+	DEFAULT_STORY_CLOCK,
+	PLAYER_LOCATION_KEY,
+	type DirectiveRow,
+	type EventRow,
+	type LocationLogRow,
+	type LocationRow,
+	type NpcMemoryRow,
+	type NpcRelationRow,
+	type NpcRow,
+	type NpcTraitRow,
+	type PhaseRow,
+	type StoryClock,
+	type TimeLogRow,
+	type TurnLogRow,
+	type WorldStateRow,
+} from "./types.ts";
 
 /** turn_seq 运行时校验（类型层面已强制；此为纵深防御，覆盖 JS 调用与缺参）。 */
 function assertTurnSeq(turnSeq: unknown): asserts turnSeq is number {
@@ -12,6 +28,22 @@ function assertTurnSeq(turnSeq: unknown): asserts turnSeq is number {
 		throw new TypeError(
 			`turn_seq 纪律：写入 API 必须显式传非负整数 turnSeq，收到 ${String(turnSeq)}`,
 		);
+	}
+}
+
+/** 解析 location_log.subject：'player' 或 'npc:<id>'。格式非法抛错。 */
+function parseSubject(subject: string): { kind: "player" } | { kind: "npc"; npcId: number } {
+	if (subject === "player") return { kind: "player" };
+	const m = /^npc:(\d+)$/.exec(subject);
+	if (m) return { kind: "npc", npcId: Number(m[1]) };
+	throw new Error(`非法 subject 格式: ${JSON.stringify(subject)}（应为 'player' 或 'npc:<id>'）`);
+}
+
+/** 登记校验：地点必须已存在（§5.0 地点概念从 DB 来的登记校验契约）。 */
+function assertLocationRegistered(db: DatabaseSync, locationId: number, context: string): void {
+	const row = db.prepare("SELECT id FROM locations WHERE id = ?").get(locationId);
+	if (!row) {
+		throw new Error(`${context}: 地点 #${locationId} 未登记（location_id 必须先经 locations 注册表查询）`);
 	}
 }
 
@@ -74,7 +106,7 @@ export class DbWriter {
 	// 叙事世界
 	// ------------------------------------------------------------------
 
-	/** 追加事件。type 默认 'event'（取值词汇待 M2 校准）。 */
+	/** 追加事件。type 默认 'event'（取值词汇待 M2 校准）。locationId 提供则做登记校验（§5.0）。 */
 	insertEvent(input: {
 		turnSeq: number;
 		summary: string;
@@ -83,13 +115,17 @@ export class DbWriter {
 		type?: string;
 		participants?: string;
 		location?: string;
+		locationId?: number;
 		createdEntryId?: string;
 	}): EventRow {
 		assertTurnSeq(input.turnSeq);
+		if (input.locationId !== undefined) {
+			assertLocationRegistered(this.db, input.locationId, "insertEvent");
+		}
 		const res = this.db
 			.prepare(
-				`INSERT INTO events (turn_seq, story_time, type, summary, detail, participants, location, created_entry_id)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+				`INSERT INTO events (turn_seq, story_time, type, summary, detail, participants, location, location_id, created_entry_id)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			)
 			.run(
 				input.turnSeq,
@@ -99,6 +135,7 @@ export class DbWriter {
 				input.detail ?? null,
 				input.participants ?? null,
 				input.location ?? null,
+				input.locationId ?? null,
 				input.createdEntryId ?? null,
 			);
 		return {
@@ -110,6 +147,7 @@ export class DbWriter {
 			detail: input.detail ?? null,
 			participants: input.participants ?? null,
 			location: input.location ?? null,
+			location_id: input.locationId ?? null,
 			created_entry_id: input.createdEntryId ?? null,
 		};
 	}
@@ -149,10 +187,121 @@ export class DbWriter {
 	}
 
 	// ------------------------------------------------------------------
+	// 空间基元（§5.1 locations / location_log）
+	// ------------------------------------------------------------------
+
+	/**
+	 * 登记地点（幂等变体：按 name 去重，已存在则直接返回既有行——seed/卡包可重复执行）。
+	 * parentId 提供时校验其已登记（§5.0 登记校验契约）。
+	 */
+	insertLocation(input: { name: string; parentId?: number; detail?: string }): LocationRow {
+		if (input.name.trim() === "") {
+			throw new Error("insertLocation: name 不能为空");
+		}
+		const existing = this.db.prepare("SELECT id FROM locations WHERE name = ?").get(input.name) as
+			| { id: number }
+			| undefined;
+		if (existing) {
+			return this.getLocationRow(existing.id);
+		}
+		if (input.parentId !== undefined) {
+			assertLocationRegistered(this.db, input.parentId, "insertLocation(parentId)");
+		}
+		const res = this.db
+			.prepare("INSERT INTO locations (name, parent_id, detail) VALUES (?, ?, ?)")
+			.run(input.name, input.parentId ?? null, input.detail ?? null);
+		return this.getLocationRow(Number(res.lastInsertRowid));
+	}
+
+	/**
+	 * 实体移动（§5.1 location_log 镜像 time_log）。subject = 'player' 或 'npc:<id>'。
+	 * - toLocationId 必须已登记（登记校验契约，§5.0）；未登记抛错。
+	 * - 'player' → upsert world_state 约定键 player_location；'npc:<id>' → 校验 npc 存在后
+	 *   update npcs.current_location；两种都写 location_log（from = 当前值，首移为 NULL）。
+	 * - 原子：location_log + 目标表更新在单事务内。
+	 */
+	moveSubject(input: { turnSeq: number; subject: string; toLocationId: number; note?: string }): LocationLogRow {
+		assertTurnSeq(input.turnSeq);
+		const parsed = parseSubject(input.subject);
+		assertLocationRegistered(this.db, input.toLocationId, "moveSubject");
+
+		// from = 当前值（player 读 world_state 约定键；npc 读 npcs.current_location）
+		let fromLocation: number | null = null;
+		if (parsed.kind === "player") {
+			const ws = this.db.prepare("SELECT value FROM world_state WHERE key = ?").get(PLAYER_LOCATION_KEY) as
+				| { value: string }
+				| undefined;
+			const n = ws ? Number(ws.value) : NaN;
+			fromLocation = Number.isInteger(n) && n >= 0 ? n : null;
+		} else {
+			const npc = this.db
+				.prepare("SELECT id, current_location FROM npcs WHERE id = ?")
+				.get(parsed.npcId) as { id: number; current_location: number | null } | undefined;
+			if (!npc) {
+				throw new Error(`moveSubject: npc #${parsed.npcId} 不存在`);
+			}
+			fromLocation = npc.current_location;
+		}
+
+		this.db.exec("BEGIN");
+		try {
+			this.db
+				.prepare(
+					"INSERT INTO location_log (turn_seq, subject, from_location, to_location, note) VALUES (?, ?, ?, ?, ?)",
+				)
+				.run(input.turnSeq, input.subject, fromLocation, input.toLocationId, input.note ?? null);
+			if (parsed.kind === "player") {
+				this.db
+					.prepare(
+						`INSERT INTO world_state (key, value, turn_seq) VALUES (?, ?, ?)
+						 ON CONFLICT(key) DO UPDATE SET value = excluded.value, turn_seq = excluded.turn_seq`,
+					)
+					.run(PLAYER_LOCATION_KEY, String(input.toLocationId), input.turnSeq);
+			} else {
+				this.db.prepare("UPDATE npcs SET current_location = ? WHERE id = ?").run(input.toLocationId, parsed.npcId);
+			}
+			this.db.exec("COMMIT");
+		} catch (err) {
+			this.db.exec("ROLLBACK");
+			throw err;
+		}
+		return this.getLatestLocationLogRow(input.turnSeq, input.subject);
+	}
+
+	/** 按 id 读 locations 行（含 parent 名解析）。 */
+	private getLocationRow(id: number): LocationRow {
+		const row = this.db
+			.prepare(
+				`SELECT l.id, l.name, l.parent_id, l.detail, p.name AS parent_name
+				 FROM locations l LEFT JOIN locations p ON p.id = l.parent_id WHERE l.id = ?`,
+			)
+			.get(id) as LocationRow | undefined;
+		if (!row) throw new Error(`locations 行 #${id} 不存在（内部错误）`);
+		return row;
+	}
+
+	/** 按 (turn_seq, subject) 取最近一条 location_log（含地点名解析）。 */
+	private getLatestLocationLogRow(turnSeq: number, subject: string): LocationLogRow {
+		const row = this.db
+			.prepare(
+				`SELECT ll.turn_seq, ll.subject, ll.from_location, ll.to_location, ll.note,
+				        fl.name AS from_location_name, tl.name AS to_location_name
+				 FROM location_log ll
+				 LEFT JOIN locations fl ON fl.id = ll.from_location
+				 LEFT JOIN locations tl ON tl.id = ll.to_location
+				 WHERE ll.turn_seq = ? AND ll.subject = ?
+				 ORDER BY ll.rowid DESC LIMIT 1`,
+			)
+			.get(turnSeq, subject) as LocationLogRow | undefined;
+		if (!row) throw new Error(`location_log 行不存在（内部错误）`);
+		return row;
+	}
+
+	// ------------------------------------------------------------------
 	// NPC
 	// ------------------------------------------------------------------
 
-	/** 新建 NPC（npcs 表无 turn_seq 列）。 */
+	/** 新建 NPC（npcs 表无 turn_seq 列；current_location 初始 NULL，由 moveSubject 更新）。 */
 	insertNpc(input: { name: string; cardRef?: string; status?: string }): NpcRow {
 		const res = this.db
 			.prepare("INSERT INTO npcs (name, card_ref, status) VALUES (?, ?, ?)")
@@ -162,6 +311,8 @@ export class DbWriter {
 			name: input.name,
 			card_ref: input.cardRef ?? null,
 			status: input.status ?? "alive",
+			current_location: null,
+			current_location_name: null,
 		};
 	}
 

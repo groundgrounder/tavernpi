@@ -22,7 +22,8 @@ export interface TimeLogRow {
 	span_note: string | null;
 }
 
-/** 叙事事件。story_time = 事件发生的故事时间（§5.3 events.story_time 锚点）。 */
+/** 叙事事件。story_time = 事件发生的故事时间（§5.3 events.story_time 锚点）。
+ *  location 自由文本留作叙事描述；location_id 引用 locations（登记校验，§5.1）。 */
 export interface EventRow {
 	id: number;
 	turn_seq: number;
@@ -32,6 +33,7 @@ export interface EventRow {
 	detail: string | null;
 	participants: string | null;
 	location: string | null;
+	location_id: number | null;
 	created_entry_id: string | null;
 }
 
@@ -45,19 +47,53 @@ export interface PhaseRow {
 	status: string;
 }
 
-/** 世界状态键值（天气、经济等）。 */
+/** 世界状态键值（天气、经济等）。约定键 player_location = 玩家当前 location_id（§5.1）。 */
 export interface WorldStateRow {
 	key: string;
 	value: string;
 	turn_seq: number;
 }
 
-/** NPC。status: alive/dead/absent...（开放集合，待 M2 校准）。 */
+/** world_state 约定键：玩家当前所在地点 id（文本 = location_id）。 */
+export const PLAYER_LOCATION_KEY = "player_location";
+
+/** world_state 存的 location id 文本 → number | null（非法值返回 null）。 */
+export function parseLocationId(value: string): number | null {
+	const n = Number(value);
+	return Number.isInteger(n) && n >= 0 ? n : null;
+}
+
+/** 地点注册表行（§5.1）。parent_id 表达包含关系（如 王城>庭院），不构成完整拓扑，内核不校验连通性。 */
+export interface LocationRow {
+	id: number;
+	name: string;
+	parent_id: number | null;
+	detail: string | null;
+	/** 父地点名（LEFT JOIN locations 解析；无父为 null）。 */
+	parent_name: string | null;
+}
+
+/** 位置变更记录（§5.1，镜像 time_log）。subject = 'player' 或 'npc:<id>'。 */
+export interface LocationLogRow {
+	turn_seq: number;
+	subject: string;
+	from_location: number | null;
+	to_location: number | null;
+	note: string | null;
+	/** 起点/终点地点名（LEFT JOIN 解析；null 表示起点为空或未登记）。 */
+	from_location_name: string | null;
+	to_location_name: string | null;
+}
+
+/** NPC。status: alive/dead/absent...（开放集合，待 M2 校准）。current_location 引用 locations。 */
 export interface NpcRow {
 	id: number;
 	name: string;
 	card_ref: string | null;
 	status: string;
+	current_location: number | null;
+	/** 当前所在地点名（LEFT JOIN locations 解析）。 */
+	current_location_name: string | null;
 }
 
 /** 性格特征，可演化 —— (npc_id, trait, turn_seq) 保留每次演化。weight 语义待 M2 校准。 */
