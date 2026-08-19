@@ -28,8 +28,10 @@ function requireTurnSeq(getCurrentTurnSeq: (() => number) | undefined): number {
 	return getCurrentTurnSeq();
 }
 
-/** 为指定 storyDb 创建 db 工具集。 */
-export function createDbTools(storyDb: StoryDb, options: DbToolsOptions = {}): ToolDefinition[] {
+/** 为指定 storyDb 创建 db 工具集。
+ * storyDb 可为实例或 getter（恢复会替换 StoryDb 实例，getter 保证工具始终访问当前库）。 */
+export function createDbTools(storyDb: StoryDb | (() => StoryDb), options: DbToolsOptions = {}): ToolDefinition[] {
+	const getStoryDb = typeof storyDb === "function" ? storyDb : () => storyDb;
 	const getTurnSeq = options.getCurrentTurnSeq;
 
 	const getClockTool = defineTool({
@@ -38,7 +40,7 @@ export function createDbTools(storyDb: StoryDb, options: DbToolsOptions = {}): T
 		description: "返回当前故事时间、历法与粒度（clock 单例）。",
 		parameters: EMPTY_PARAMS,
 		execute: async () => {
-			const clock = storyDb.reader.getClock();
+			const clock = getStoryDb().reader.getClock();
 			const text = clock
 				? `当前故事时间: ${clock.current_time}（历法 ${clock.calendar}，粒度 ${clock.granularity}）`
 				: "(时钟未初始化)";
@@ -59,7 +61,7 @@ export function createDbTools(storyDb: StoryDb, options: DbToolsOptions = {}): T
 			{ additionalProperties: false },
 		),
 		execute: async (_toolCallId, params) => {
-			const rows = storyDb.reader.listEvents({
+			const rows = getStoryDb().reader.listEvents({
 				fromTurn: params.from_turn,
 				toTurn: params.to_turn,
 				type: params.type,
@@ -81,7 +83,7 @@ export function createDbTools(storyDb: StoryDb, options: DbToolsOptions = {}): T
 			{ additionalProperties: false },
 		),
 		execute: async (_toolCallId, params) => {
-			const { npc, traits, memories, relations } = storyDb.reader.getNpc(params.npc_id);
+			const { npc, traits, memories, relations } = getStoryDb().reader.getNpc(params.npc_id);
 			const empty: NpcComposite = { npc: undefined, traits: [], memories: [], relations: [] };
 			if (!npc) {
 				return {
@@ -119,7 +121,7 @@ export function createDbTools(storyDb: StoryDb, options: DbToolsOptions = {}): T
 		),
 		execute: async (_toolCallId, params) => {
 			// 走强制写入 API（DbWriter.insertEvent，turnSeq 必填）—— 纪律链路的验证点。
-			const row = storyDb.writer.insertEvent({
+			const row = getStoryDb().writer.insertEvent({
 				turnSeq: requireTurnSeq(getTurnSeq),
 				summary: params.summary,
 				detail: params.detail,
@@ -149,7 +151,7 @@ export function createDbTools(storyDb: StoryDb, options: DbToolsOptions = {}): T
 		execute: async (_toolCallId, params) => {
 			// 走强制写入 API（DbWriter.advanceClock）：from_time 由 writer 内部读 clock 单例，
 			// 保证 time_log.from_time ≡ 写入时 clock.current_time。
-			const row = storyDb.writer.advanceClock({
+			const row = getStoryDb().writer.advanceClock({
 				turnSeq: requireTurnSeq(getTurnSeq),
 				toTime: params.to_time,
 				spanNote: params.span_note,

@@ -11,6 +11,7 @@
   },
   "scripts": {
     "spike:m0": "node packages/app/spike/08-m0-demo.ts",
+    "spike:m1": "node packages/app/spike/09-m1-story-db.ts",
     "spike:01": "node packages/app/spike/01-hello.ts",
     "spike:02": "node packages/app/spike/02-resource-takeover.ts",
     "spike:03": "node packages/app/spike/03-tool-whitelist.ts",
@@ -19,7 +20,9 @@
     "spike:06": "node packages/app/spike/06-sqlite-backup.ts",
     "spike:07": "node packages/app/spike/07-compaction.ts",
     "typecheck": "tsc -p packages/core/tsconfig.json && tsc -p packages/app/tsconfig.json",
-    "test": "node --test \"packages/core/test/**/*.test.ts\""
+    "test": "node --test \"packages/core/test/**/*.test.ts\"",
+    "m1:cli": "node packages/app/src/m1-cli.ts",
+    "m1:accept": "node packages/app/acceptance/m1.ts"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

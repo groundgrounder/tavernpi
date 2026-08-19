@@ -3,5 +3,5 @@
   "compilerOptions": {
     "rootDir": "."
   },
-  "include": ["spike/**/*.ts"]
+  "include": ["spike/**/*.ts", "src/**/*.ts", "acceptance/**/*.ts"]
 }

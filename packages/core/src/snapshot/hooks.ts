@@ -85,12 +85,15 @@ export function createSnapshotHooks(options: SnapshotHooksOptions): SnapshotHook
 			return;
 		}
 
-		// 祖先链无快照。区分两种语义（§3.1 + M1-P2 gate m3）：
-		// - 故事尚无历史（turn_log 为空，首轮前/全新故事）：空库初始状态兜底；
-		// - 故事已有历史但快照全无（外部损伤场景）：判恢复失败，拒绝静默擦成空库。
+		// 祖先链无快照。区分两种语义（§3.1 + M1-P2 gate m3 + Lane3 接线修正）：
+		// - 快照库非空但本链无快照（如导航到首个 user 条目 u1，链上只有 [u1, root]）：
+		//   正常「重做开头」语义——空库兜底 = 故事初始态（reconciliation 裁决）；
+		// - 故事已有历史（turn_log 非空）且 snapshots.db 全空（外部损伤场景）：判恢复失败，
+		//   拒绝静默擦成空库。
 		const turnLogCount = options.getStoryDb().reader.getTurnLog().length;
-		if (turnLogCount > 0) {
-			const message = `祖先链无快照但 turn_log 非空（${turnLogCount} 轮）——疑似外部损伤，拒绝空库兜底，保持当前库不动`;
+		const snapshotCount = options.snapshotsDb.listSnapshots().length;
+		if (turnLogCount > 0 && snapshotCount === 0) {
+			const message = `祖先链无快照但 turn_log 非空且 snapshots.db 为空（turn_log ${turnLogCount} 轮）——疑似外部损伤，拒绝空库兜底，保持当前库不动`;
 			pending = { kind: "failed", error: message };
 			pushWarning(message);
 			return;
