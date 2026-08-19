@@ -1,0 +1,20 @@
+{
+  "name": "tavernpi",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "spike:m0": "node packages/app/spike/01-hello.ts",
+    "typecheck": "tsc -p packages/core/tsconfig.json && tsc -p packages/app/tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.3"
+  }
+}

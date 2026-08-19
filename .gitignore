@@ -2,6 +2,8 @@
 .slim/clonedeps/repos/
 # END oh-my-opencode-slim clonedeps
 
+.slim/deepwork/
+
 # Node
 node_modules/
 dist/
