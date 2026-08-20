@@ -1,5 +1,6 @@
 // tavernpi-core 对外导出收敛（创作规划 §10.2 API 承诺面的源头）。
-// M1-P1：故事 DB 层；M1-P2：快照管理器（§3.1 ★承重机制）。
+// M1-P1：故事 DB 层；M1-P2：快照管理器（§3.1 ★承重机制）；M2-P1：提示词分层/subagent 运行时/
+// pipeline 事件流/模型配置最小形态。
 
 export const CORE_VERSION = "0.0.0";
 
@@ -81,3 +82,42 @@ export type {
 	InteractionHandler,
 	InteractionRequest,
 } from "./interaction/index.ts";
+
+// 提示词分层加载器（§6.5）
+export {
+	builtinPromptsDir,
+	defaultGlobalPromptsDir,
+	loadPrompt,
+	renderPlaceholders,
+	type LoadedPrompt,
+	type PlaceholderRender,
+	type PromptLayer,
+	type PromptLayerDirs,
+} from "./prompts/loader.ts";
+
+// subagent 运行时（§6.0 总则 / 技术路线 §3.3）
+export {
+	runSubagent,
+	SubagentOutputError,
+	type SubagentOutputTool,
+	type SubagentResult,
+	type SubagentRunOptions,
+	type SubagentUsage,
+} from "./subagent/runtime.ts";
+
+// pipeline 事件流（§10.2 承诺面 M2 起）
+export {
+	createPipelineEventLog,
+	type PipelineEvent,
+	type PipelineEventLog,
+	type PipelineEventListener,
+} from "./pipeline/events.ts";
+
+// 模型配置最小形态（§6.6）
+export {
+	defaultSettingsPath,
+	loadSettings,
+	type ModelRef,
+	type TavernModels,
+	type TavernSettings,
+} from "./settings.ts";
