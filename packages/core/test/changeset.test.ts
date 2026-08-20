@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { cleanupTempDir, makeTempDir } from "./helpers.ts";
 import { openStoryDb, type StoryDb } from "../src/db/story-db.ts";
 import { DEFAULT_STORY_CLOCK } from "../src/db/types.ts";
-import { applyChangeset, changesetZodSchema, validateChangesetSemantics, type Changeset } from "../src/pipeline/changeset.ts";
+import { applyChangeset, changesetZodSchema, isReservedWorldStateKey, validateChangesetSemantics, type Changeset } from "../src/pipeline/changeset.ts";
 
 function openTempStory(dir: string): StoryDb {
 	return openStoryDb(join(dir, "story.db"));
@@ -102,6 +102,27 @@ test("validateChangesetSemantics：new_locations 先登记后引用可通过；�
 		});
 		const problems = validateChangesetSemantics(story, cs);
 		assert.deepEqual(problems, [], "同集登记后引用与同日时间推进不应报问题");
+		story.close();
+	} finally {
+		cleanupTempDir(dir);
+	}
+});
+
+test("validateChangesetSemantics：sys_ 内核保留键禁写（编排器簿记键命名空间）", () => {
+	const dir = makeTempDir();
+	try {
+		const story = openTempStory(dir);
+		seedStory(story);
+		const cs = changesetZodSchema.parse({
+			world_state: [{ key: "sys_npc_offscreen_last_turn:1", value: "5" }],
+		});
+		const problems = validateChangesetSemantics(story, cs);
+		assert.ok(problems.some((p) => p.includes("sys_")), "sys_ 前缀键应被拒");
+		// isReservedWorldStateKey 判定
+		assert.equal(isReservedWorldStateKey("sys_npc_offscreen_last_turn:3"), true);
+		assert.equal(isReservedWorldStateKey("player_location"), true);
+		assert.equal(isReservedWorldStateKey("weather"), false);
+		assert.equal(isReservedWorldStateKey("sys_任意后缀"), true, "前缀匹配只看 sys_ 开头");
 		story.close();
 	} finally {
 		cleanupTempDir(dir);

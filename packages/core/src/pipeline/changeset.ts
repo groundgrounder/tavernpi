@@ -113,6 +113,15 @@ export const CHANGELOG_JSON_SCHEMA = changesetZodSchema.toJSONSchema() as unknow
 
 type SubjectRef = { kind: "player" } | { kind: "npc"; npcId: number } | "invalid";
 
+/**
+ * 内核保留 world_state 键判定：player_location（玩家位置约定键）或 sys_ 前缀。
+ * sys_ = 内核簿记键命名空间（如 sys_npc_offscreen_last_turn:<id>），由编排器直接维护
+ * （同 clock 例外精神——pipeline 元数据非世界事实，data subagent 禁写）。
+ */
+export function isReservedWorldStateKey(key: string): boolean {
+	return key === PLAYER_LOCATION_KEY || key.startsWith("sys_");
+}
+
 /** 解析 location_moves.subject（'player' | 'npc:<id>'）；格式非法返回 'invalid'。 */
 function parseSubjectName(subject: string): SubjectRef {
 	if (subject === "player") return { kind: "player" };
@@ -127,7 +136,7 @@ function parseSubjectName(subject: string): SubjectRef {
  *   location_moves.to_location_name / new_npcs.location_name / new_locations.parent_name 必须可解析；
  * - NPC 存在性：npc_updates.npc_id / relations.other_npc_id / location_moves subject='npc:<id>'；
  * - time_advance 不倒流（字符串字典序比较——ISO 日期前提，同日时段推进走 span_note，相等允许）；
- * - world_state 禁写内核保留键 player_location（玩家位置只能经 location_moves）；
+ * - world_state 禁写内核保留键（player_location 或 sys_ 前缀，见 isReservedWorldStateKey）；
  * - phase_end.name 必须匹配一个 ended_turn IS NULL 的 phase。
  */
 export function validateChangesetSemantics(storyDb: StoryDb, cs: Changeset): string[] {
@@ -192,8 +201,10 @@ export function validateChangesetSemantics(storyDb: StoryDb, cs: Changeset): str
 		}
 	}
 	for (const w of cs.world_state) {
-		if (w.key === PLAYER_LOCATION_KEY) {
-			problems.push(`world_state.key 是内核保留键，玩家位置只能经 location_moves 更新: ${JSON.stringify(w.key)}`);
+		if (isReservedWorldStateKey(w.key)) {
+			problems.push(
+				`world_state.key 是内核保留键（player_location 或 sys_ 前缀），data subagent 禁写: ${JSON.stringify(w.key)}`,
+			);
 		}
 	}
 	if (cs.phase_end !== undefined) {
