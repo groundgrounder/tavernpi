@@ -12,6 +12,7 @@ import { runSubagent, type SubagentOutputTool, type SubagentResult, type Subagen
 import type { PipelineEventLog } from "./events.ts";
 import { renderDbSummary } from "./db-summary.ts";
 import { applyChangeset, changesetZodSchema, CHANGELOG_JSON_SCHEMA, type ApplySummary } from "./changeset.ts";
+import { renderOffscreenDeltasForData, type OffscreenDelta } from "./npc-stage.ts";
 
 /** data subagent 的输出工具名（唯一白名单工具；constrainedSampling 强制 JSON 结构输出）。 */
 export const DATA_OUTPUT_TOOL_NAME = "submit_changeset";
@@ -30,6 +31,8 @@ export interface DataStageInput {
 	createdEntryId?: string;
 	/** data 失败待补齐轮（§6.1）：事实尚未入 DB，须一并抽取进本次变更集。 */
 	pendingTurns: Array<{ turnSeq: number; userInput: string; narrativeText: string }>;
+	/** 离线 NPC 推演结构化产物（§6.2 npc 层；data 是唯一写者，须照实转写落库）。空/缺省不加节。 */
+	offscreenDeltas?: OffscreenDelta[];
 }
 
 export interface DataStageOptions {
@@ -78,6 +81,9 @@ function buildUserPrompt(storyDb: StoryDb, input: DataStageInput): string {
 				),
 			].join("\n"),
 		);
+	}
+	if (input.offscreenDeltas !== undefined && input.offscreenDeltas.length > 0) {
+		parts.push(`## 离线 NPC 推演产物\n${renderOffscreenDeltasForData(input.offscreenDeltas, storyDb)}`);
 	}
 	parts.push(`## 指令\n${TASK_INSTRUCTIONS}`);
 	return parts.join("\n\n");

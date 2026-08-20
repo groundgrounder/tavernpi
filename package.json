@@ -24,7 +24,7 @@
     "m1:cli": "node packages/app/src/m1-cli.ts",
     "m1:accept": "node packages/app/acceptance/m1.ts",
     "m2:cli": "node packages/app/src/m2-cli.ts",
-    "m2:accept": "node packages/app/acceptance/m2.ts"
+    "m3:cli": "node packages/app/src/m3-cli.ts"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

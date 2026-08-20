@@ -1,6 +1,7 @@
 // tavernpi-core 对外导出收敛（创作规划 §10.2 API 承诺面的源头）。
 // M1-P1：故事 DB 层；M1-P2：快照管理器（§3.1 ★承重机制）；M2-P1：提示词分层/subagent 运行时/
-// pipeline 事件流/模型配置最小形态；M2-P2：data subagent（§6.1）+ StoryRuntime 编排器（§10.2）。
+// pipeline 事件流/模型配置最小形态；M2-P2：data subagent（§6.1）+ StoryRuntime 编排器（§10.2）；
+// M3-P2：npc subagent 阶段（§6.2）接入 StoryRuntime 并导出公开面。
 
 export const CORE_VERSION = "0.0.0";
 
@@ -145,10 +146,32 @@ export {
 	type DataStageOutcome,
 } from "./pipeline/data-stage.ts";
 
-// StoryRuntime 编排器（§10.2 API 面 M2 形态）
+// npc subagent（§6.2：场景规划 / 在场预演 / 离线推演 / 渲染器 / 簿记键）
+// isReservedWorldStateKey 从 changeset 重导出：sys_ 前缀命名空间是 npc 簿记键的权威判定
+//（data 禁写内核保留键，见 changeset.ts），归属 npc 节更贴合其用途。
+export { isReservedWorldStateKey } from "./pipeline/changeset.ts";
+export {
+	OFFSCREEN_LAST_TURN_PREFIX,
+	OFFSCREEN_OUTPUT_TOOL_NAME,
+	ONSTAGE_OUTPUT_TOOL_NAME,
+	computeScenePlan,
+	offscreenLastTurnKey,
+	renderOffscreenDeltasForData,
+	renderRehearsals,
+	runOffscreenBatch,
+	runOnstageRehearsals,
+	type NpcRehearsal,
+	type NpcStageOptions,
+	type OffscreenBatch,
+	type OffscreenDelta,
+	type ScenePlan,
+} from "./pipeline/npc-stage.ts";
+
+// StoryRuntime 编排器（§10.2 API 面 M2 形态 + §6.2 npc 阶段）
 export {
 	computeNextTurnSeq,
 	createStoryRuntime,
+	type NpcStageRuntimeOptions,
 	type StoryRuntime,
 	type StoryRuntimeOptions,
 	type StoryState,

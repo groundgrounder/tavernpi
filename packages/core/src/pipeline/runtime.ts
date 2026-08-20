@@ -2,7 +2,10 @@
 // 接线（app/CLI 只消费 core API）：
 //   SessionManager ↔ StoryDb ↔ SnapshotsDb ↔ createSnapshotHooks（导航原子恢复）
 //   ↔ 主叙事 AgentSession（零工具 + before_agent_start 每轮注入 DB 摘要）
-//   ↔ runDataStage（data subagent：抽取落库，唯一写者，§6.1）。
+//   ↔ runDataStage（data subagent：抽取落库，唯一写者，§6.1）
+//   ↔ npc 阶段（§6.2：场景规划 → 在场预演 ×N 并行 + 离线批量推演 → 主叙事 → data）；
+//     预演产物注入主叙事隐藏批注，离线 delta 交 data 转写落库——npc 层永不直接写库，
+//     只由编排器在 data.ok 后直写 sys_ 簿记键（同 clock 例外精神）。
 //
 // 关键接线决策（与 M1 一致，文件头复述）：
 // 1. 快照绑定本轮 leaf（最终 assistant entry），与 turn_log 同一 id。pi navigateTree 语义：
@@ -40,6 +43,16 @@ import type { TavernModels, TavernSettings } from "../settings.ts";
 import { loadPrompt, renderPlaceholders, type PromptLayerDirs } from "../prompts/loader.ts";
 import type { SubagentRunOptions } from "../subagent/runtime.ts";
 import { runDataStage, type DataStageOptions, type DataStageOutcome } from "./data-stage.ts";
+import {
+	computeScenePlan,
+	offscreenLastTurnKey,
+	renderRehearsals,
+	runOffscreenBatch,
+	runOnstageRehearsals,
+	type NpcRehearsal,
+	type NpcStageOptions,
+	type OffscreenDelta,
+} from "./npc-stage.ts";
 import type { PipelineEventLog } from "./events.ts";
 import { renderDbSummary } from "./db-summary.ts";
 
@@ -121,6 +134,17 @@ export interface StoryState {
 	snapshotsDb: SnapshotsDb;
 }
 
+/** npc subagent 阶段运行时选项（§6.2）。enabled 缺省 false——M2 路径（npc 关闭）零改动。 */
+export interface NpcStageRuntimeOptions {
+	enabled: boolean;
+	/** 离线推演触发阈值：距上次推演 ≥ N 轮触发（默认 5）。 */
+	offscreenAfterTurns?: number;
+	/** 每 NPC / 每批重试上限（默认 2）。 */
+	maxAttempts?: number;
+	/** npc 执行器注入（验收故障注入，npc 专用）。 */
+	executor?: NpcStageOptions["executor"];
+}
+
 export interface StoryRuntimeOptions {
 	cwd: string;
 	sessionManager: SessionManager;
@@ -136,6 +160,11 @@ export interface StoryRuntimeOptions {
 	failureWarningThreshold?: number;
 	/** data 执行器注入（验收故障注入）。 */
 	dataExecutor?: DataStageOptions["executor"];
+	/** npc subagent 阶段（§6.2）。缺省关闭（M2 形态不变）。 */
+	npc?: NpcStageRuntimeOptions;
+	/** 系统提示渲染完成回调（§10.2 pipeline 可观测性）：before_agent_start 每次注入后调用，
+	 *  参数为渲染好的当轮系统提示全文（含 db_summary 与当轮 npc 预演批注）。观测钩子，不影响渲染语义。 */
+	onSystemPromptRender?: (rendered: string) => void;
 }
 
 export interface TurnResult {
@@ -146,6 +175,13 @@ export interface TurnResult {
 	data: DataStageOutcome;
 	snapshotTaken: boolean;
 	consecutiveDataFailures: number;
+	/** npc 阶段报告（§6.2；npc 关闭时缺省）。 */
+	npc?: {
+		onstageNpcIds: number[];
+		rehearsals: NpcRehearsal[];
+		offscreenTriggeredIds: number[];
+		offscreenDeltas: OffscreenDelta[];
+	};
 }
 
 export interface StoryRuntime {
@@ -162,6 +198,8 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 	const { cwd, sessionManager, storyState, settings, modelRuntime, prompts, eventLog, onWarning } = opts;
 	const maxDataAttempts = opts.maxDataAttempts ?? 3;
 	const failureWarningThreshold = opts.failureWarningThreshold ?? 3;
+	// npc 阶段选项：缺省关闭（enabled=false，M2 形态不变）。
+	const npcOpts: NpcStageRuntimeOptions = { enabled: false, ...opts.npc };
 
 	const hooks = createSnapshotHooks({
 		snapshotsDb: storyState.snapshotsDb,
@@ -177,6 +215,11 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 	const narratorTemplate = loadPrompt("narrator", prompts).content;
 	const narratorModel = resolveRoleModel(settings, "narrator", modelRuntime, onWarning);
 	const dataModel = resolveRoleModel(settings, "data", modelRuntime, onWarning);
+	const npcModel = resolveRoleModel(settings, "npc", modelRuntime, onWarning);
+
+	// npc 预演产物注入通道（§6.2）：runTurn 的 npc 阶段写入，before_agent_start 一并渲染；
+	// turn 结束后复位（只属当轮）。npc 未启用时恒为 undefined → 占位符落「无在场 NPC 预演」。
+	let pendingRehearsals: string | undefined;
 
 	const extensionFactories: Array<(pi: ExtensionAPI) => void> = [
 		(pi) => {
@@ -186,13 +229,19 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 			pi.on("session_tree", (event, ctx) => {
 				hooks.sessionTree(event, ctx);
 			});
-			// DB 摘要每轮注入通道：before_agent_start 每次 prompt 触发一次，整串替换当轮系统提示。
-			// renderPlaceholders 只替换 {{db_summary}}，其余模板原样保留。
-			pi.on("before_agent_start", () => ({
-				systemPrompt: renderPlaceholders(narratorTemplate, {
+			// DB 摘要 + npc 预演批注每轮注入通道：before_agent_start 每次 prompt 触发一次，整串替换当轮系统提示。
+			// renderPlaceholders 只替换 {{db_summary}} / {{npc_rehearsals}}，其余模板原样保留。
+			// onSystemPromptRender：渲染完成回调（§10.2 可观测性），供验收/观测钩子读取注入内容。
+			pi.on("before_agent_start", () => {
+				const rendered = renderPlaceholders(narratorTemplate, {
 					db_summary: renderDbSummary(storyState.storyDb),
-				}).text,
-			}));
+					// npc 未启用时 pendingRehearsals 恒 undefined → 占位符渲染为「无在场 NPC 预演」
+					// （M2 路径渲染结果含该行，可接受，见规格 §1）。
+					npc_rehearsals: pendingRehearsals ?? "（本轮无在场 NPC 预演）",
+				}).text;
+				opts.onSystemPromptRender?.(rendered);
+				return { systemPrompt: rendered };
+			});
 		},
 	];
 
@@ -243,71 +292,140 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 		const turnSeq = computeNextTurnSeq(storyState.storyDb);
 		const startedAt = Date.now();
 
-		await session.prompt(input);
-
-		const leafId = sessionManager.getLeafId();
-		if (leafId === null) {
-			throw new Error("prompt 后无 leaf entry（会话树异常）");
-		}
-		const userEntryId = getUserEntryId(sessionManager, beforeLeaf);
-		const narrativeText = extractLastAssistantReply(session.state.messages.slice(beforeCount)) ?? "";
-
-		// turn_log 与快照都绑定本轮 leaf（最终 assistant entry）：导航到 user u_N 重做第 N 轮时
-		// 恢复第 N-1 轮末状态，保证一致性且防止事件双重落库（见文件头决策 1）。
-		storyState.storyDb.writer.recordTurnLog({
-			turnSeq,
-			sessionEntryId: leafId,
-			userInput: input,
-			narrativeText,
-		});
-
-		// data 阶段：抽取落库（唯一写者，§6.1）。pendingTurns = 此前失败未入库轮。
-		const data = await runDataStage({
-			storyDb: storyState.storyDb,
-			input: { turnSeq, userInput: input, narrativeText, createdEntryId: leafId, pendingTurns: computePendingTurns(storyState.storyDb) },
-			cwd,
-			model: dataModel,
-			modelRuntime,
-			prompts,
-			eventLog,
-			maxAttempts: maxDataAttempts,
-			executor: opts.dataExecutor,
-		});
-
-		let snapshotTaken = false;
-		if (data.ok) {
-			storyState.storyDb.writer.recordDataStatus({ turnSeq, status: "ok", attempts: data.attempts });
-			// 本轮落库成功 → 此前失败的待补轮一并视作已补齐（§6.1 下轮补齐语义）。
-			storyState.storyDb.writer.markFailedTurnsCompensated();
-			await takeSnapshot(storyState.storyDb, { turnSeq, sessionEntryId: leafId });
-			snapshotTaken = true;
-		} else {
-			// §6.1：data 失败不拍快照（拍摄前提 = 落库成功），叙事照常呈现。
-			storyState.storyDb.writer.recordDataStatus({
-				turnSeq,
-				status: "failed",
-				attempts: data.attempts,
-				error: data.error,
+		// npc 阶段（§6.2 时机：场景规划 → npc 并行 → 主叙事 → data）：
+		// 在场预演与离线批量推演互不依赖，Promise.all 并行且必须在主叙事 prompt 前完成。
+		// 零消耗契约：不在场/未触发 → 不调用 subagent（返回空数组，不产生调用）。
+		let npcReport: TurnResult["npc"];
+		if (npcOpts.enabled) {
+			const scenePlan = computeScenePlan(storyState.storyDb, turnSeq, {
+				offscreenAfterTurns: npcOpts.offscreenAfterTurns,
 			});
+			const npcStageOpts: NpcStageOptions = {
+				storyDb: storyState.storyDb,
+				cwd,
+				model: npcModel,
+				modelRuntime,
+				prompts,
+				eventLog,
+				maxAttempts: npcOpts.maxAttempts,
+				executor: npcOpts.executor,
+			};
+			const [rehearsals, deltas] = await Promise.all([
+				scenePlan.onstage.length > 0
+					? runOnstageRehearsals(scenePlan.onstage, turnSeq, input, npcStageOpts)
+					: Promise.resolve<NpcRehearsal[]>([]),
+				scenePlan.offscreenTriggered.length > 0
+					? runOffscreenBatch(scenePlan.offscreenTriggered, turnSeq, npcStageOpts)
+					: Promise.resolve<OffscreenDelta[]>([]),
+			]);
+			// 预演产物注入主叙事（before_agent_start 一并渲染）；无在场预演 → 占位文本。
+			pendingRehearsals =
+				rehearsals.length === 0 ? "（本轮无在场 NPC 预演）" : renderRehearsals(rehearsals, storyState.storyDb);
+			npcReport = {
+				onstageNpcIds: scenePlan.onstage.map((n) => n.id),
+				rehearsals,
+				offscreenTriggeredIds: scenePlan.offscreenTriggered.map((n) => n.id),
+				offscreenDeltas: deltas,
+			};
 		}
 
-		const consecutiveDataFailures = countConsecutiveFailures(storyState.storyDb);
-		if (consecutiveDataFailures >= failureWarningThreshold) {
-			onWarning?.(
-				`data 落库已连续失败 ${consecutiveDataFailures} 轮（阈值 ${failureWarningThreshold}）——本轮及此前失败的叙事事实尚未入库，请留意；下轮将继续尝试补齐（§6.1）`,
-			);
+		try {
+			await session.prompt(input);
+
+			const leafId = sessionManager.getLeafId();
+			if (leafId === null) {
+				throw new Error("prompt 后无 leaf entry（会话树异常）");
+			}
+			const userEntryId = getUserEntryId(sessionManager, beforeLeaf);
+			const narrativeText = extractLastAssistantReply(session.state.messages.slice(beforeCount)) ?? "";
+
+			// turn_log 与快照都绑定本轮 leaf（最终 assistant entry）：导航到 user u_N 重做第 N 轮时
+			// 恢复第 N-1 轮末状态，保证一致性且防止事件双重落库（见文件头决策 1）。
+			storyState.storyDb.writer.recordTurnLog({
+				turnSeq,
+				sessionEntryId: leafId,
+				userInput: input,
+				narrativeText,
+			});
+
+			// data 阶段：抽取落库（唯一写者，§6.1）。pendingTurns = 此前失败未入库轮；
+			// offscreenDeltas = 本轮离线推演结构化产物（§6.2），交 data 转写落库（单写者规则不破）。
+			const data = await runDataStage({
+				storyDb: storyState.storyDb,
+				input: {
+					turnSeq,
+					userInput: input,
+					narrativeText,
+					createdEntryId: leafId,
+					pendingTurns: computePendingTurns(storyState.storyDb),
+					offscreenDeltas: npcReport?.offscreenDeltas,
+				},
+				cwd,
+				model: dataModel,
+				modelRuntime,
+				prompts,
+				eventLog,
+				maxAttempts: maxDataAttempts,
+				executor: opts.dataExecutor,
+			});
+
+			let snapshotTaken = false;
+			if (data.ok) {
+				storyState.storyDb.writer.recordDataStatus({ turnSeq, status: "ok", attempts: data.attempts });
+				// 本轮落库成功 → 此前失败的待补轮一并视作已补齐（§6.1 下轮补齐语义）。
+				storyState.storyDb.writer.markFailedTurnsCompensated();
+				// sys 键簿记（§6.2 内核簿记，编排器直写，同 clock 例外精神）：data 成功才对每个
+				// offscreenTriggered NPC 更新离线推演 last-turn 键（快照前写入，随快照持久化）；
+				// data 失败不更新 → 下轮自然重触发、delta 重算。
+				for (const npcId of npcReport?.offscreenTriggeredIds ?? []) {
+					storyState.storyDb.writer.upsertWorldState({
+						key: offscreenLastTurnKey(npcId),
+						value: String(turnSeq),
+						turnSeq,
+					});
+				}
+				await takeSnapshot(storyState.storyDb, { turnSeq, sessionEntryId: leafId });
+				snapshotTaken = true;
+			} else {
+				// §6.1：data 失败不拍快照（拍摄前提 = 落库成功），叙事照常呈现。
+				storyState.storyDb.writer.recordDataStatus({
+					turnSeq,
+					status: "failed",
+					attempts: data.attempts,
+					error: data.error,
+				});
+			}
+
+			const consecutiveDataFailures = countConsecutiveFailures(storyState.storyDb);
+			if (consecutiveDataFailures >= failureWarningThreshold) {
+				onWarning?.(
+					`data 落库已连续失败 ${consecutiveDataFailures} 轮（阈值 ${failureWarningThreshold}）——本轮及此前失败的叙事事实尚未入库，请留意；下轮将继续尝试补齐（§6.1）`,
+				);
+			}
+
+			eventLog?.record({
+				ts: new Date().toISOString(),
+				turnSeq,
+				role: "narrator",
+				ok: true,
+				durationMs: Date.now() - startedAt,
+				outputChars: narrativeText.length,
+			});
+
+			return {
+				turnSeq,
+				userEntryId,
+				leafId,
+				narrativeText,
+				data,
+				snapshotTaken,
+				consecutiveDataFailures,
+				npc: npcReport,
+			};
+		} finally {
+			// turn 结束后复位：预演产物只属当轮，不泄漏到后续 prompt（下轮 npc 阶段会重新填充）。
+			pendingRehearsals = undefined;
 		}
-
-		eventLog?.record({
-			ts: new Date().toISOString(),
-			turnSeq,
-			role: "narrator",
-			ok: true,
-			durationMs: Date.now() - startedAt,
-			outputChars: narrativeText.length,
-		});
-
-		return { turnSeq, userEntryId, leafId, narrativeText, data, snapshotTaken, consecutiveDataFailures };
 	};
 
 	return {

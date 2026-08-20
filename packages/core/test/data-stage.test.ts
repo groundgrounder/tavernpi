@@ -1,5 +1,6 @@
 // data subagent 编排单测（executor 桩，全程无真实 LLM）：一次成功、首败自纠、
-// 恒败耗尽、executor 抛错重试、pendingTurns 注入、eventLog 每次 attempt 记录。
+// 恒败耗尽、executor 抛错重试、pendingTurns 注入、eventLog 每次 attempt 记录、
+// offscreenDeltas 注入（§6.2 npc 层产物转写输入；空/缺省不加节）。
 
 import assert from "node:assert/strict";
 import { join } from "node:path";
@@ -166,6 +167,78 @@ test("runDataStage：pendingTurns 出现在 userPrompt（待补齐轮一并抽�
 		assert.match(prompt, /旧轮叙事二/);
 		assert.match(prompt, /当前轮叙事/);
 		story.close();
+	} finally {
+		cleanupTempDir(dir);
+	}
+});
+
+test("runDataStage：offscreenDeltas 非空 → userPrompt 含离线 NPC 推演产物区块（npc id 与转写指示可见）", async () => {
+	const dir = makeTempDir();
+	try {
+		const story = openTempStory(dir);
+		let prompt = "";
+		const outcome = await runDataStage({
+			storyDb: story,
+			input: {
+				turnSeq: 2,
+				userInput: "u",
+				narrativeText: "n",
+				pendingTurns: [],
+				offscreenDeltas: [{ npc_id: 7, activity: "在集市闲逛", location_name: "集市" }],
+			},
+			cwd: dir,
+			executor: async (opts) => {
+				prompt = opts.userPrompt;
+				return result(validChangeset);
+			},
+		});
+		assert.equal(outcome.ok, true);
+		// 区块标题 + P1 renderOffscreenDeltasForData 渲染内容（npc id / 活动 / 转写指示）
+		assert.match(prompt, /## 离线 NPC 推演产物/);
+		assert.match(prompt, /#7/);
+		assert.match(prompt, /在集市闲逛/);
+		assert.match(prompt, /转写进变更集落库/);
+		// 与任务节共存（抽取对象仍在）
+		assert.match(prompt, /## 指令/);
+		story.close();
+	} finally {
+		cleanupTempDir(dir);
+	}
+});
+
+test("runDataStage：offscreenDeltas 缺省/空 → userPrompt 不含离线区块（M2 输入形态不变）", async () => {
+	const dir = makeTempDir();
+	try {
+		const story = openTempStory(dir);
+		let prompt = "";
+		const outcome = await runDataStage({
+			storyDb: story,
+			input: { turnSeq: 1, userInput: "u", narrativeText: "n", pendingTurns: [] },
+			cwd: dir,
+			executor: async (opts) => {
+				prompt = opts.userPrompt;
+				return result(validChangeset);
+			},
+		});
+		assert.equal(outcome.ok, true);
+		assert.doesNotMatch(prompt, /离线 NPC 推演产物/);
+		story.close();
+
+		// 空数组同样不加节
+		const story2 = openTempStory(dir);
+		let prompt2 = "";
+		const outcome2 = await runDataStage({
+			storyDb: story2,
+			input: { turnSeq: 1, userInput: "u", narrativeText: "n", pendingTurns: [], offscreenDeltas: [] },
+			cwd: dir,
+			executor: async (opts) => {
+				prompt2 = opts.userPrompt;
+				return result(validChangeset);
+			},
+		});
+		assert.equal(outcome2.ok, true);
+		assert.doesNotMatch(prompt2, /离线 NPC 推演产物/);
+		story2.close();
 	} finally {
 		cleanupTempDir(dir);
 	}
