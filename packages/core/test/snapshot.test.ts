@@ -323,12 +323,14 @@ test("hooks：祖先链无快照且无历史 → 空库兜底（warning 记录�
 	}
 });
 
-test("hooks：祖先链无快照但 turn_log 非空（外部损伤）→ 判恢复失败，不静默擦空库", () => {
+test("hooks：祖先链无快照但 turn_log 非空且存在 data ok 轮（外部损伤）→ 判恢复失败，不静默擦空库", () => {
 	const dir = makeTempDir();
 	try {
 		const story = openStoryDb(join(dir, "story.db"));
 		story.writer.insertEvent({ turnSeq: 1, summary: "s1" });
 		story.writer.recordTurnLog({ turnSeq: 1, sessionEntryId: "e1", userInput: "u", narrativeText: "n" });
+		// 有成功落库轮（status=ok）却无任何快照 = 外部损伤（M2 修订后的判据）
+		story.writer.recordDataStatus({ turnSeq: 1, status: "ok", attempts: 1 });
 		const snap = openSnapshotsDb(snapshotsDbPath(story.path)); // 空 snapshots.db
 
 		let current: StoryDbHandle = story;
@@ -349,6 +351,37 @@ test("hooks：祖先链无快照但 turn_log 非空（外部损伤）→ 判恢�
 		// 库未被替换、未被擦除
 		assert.equal(current, story);
 		assert.equal(current.reader.getTurnLog().length, 1);
+		snap.close();
+	} finally {
+		cleanupTempDir(dir);
+	}
+});
+
+test("hooks：data 全 failed（M2 合法态，失败轮无快照）→ 空库兜底放行，不判损伤", () => {
+	const dir = makeTempDir();
+	try {
+		const story = openStoryDb(join(dir, "story.db"));
+		story.writer.insertEvent({ turnSeq: 1, summary: "s1" });
+		story.writer.recordTurnLog({ turnSeq: 1, sessionEntryId: "e1", userInput: "u", narrativeText: "n" });
+		// 只有 failed 轮（§6.1：失败轮不拍快照 → snapshots.db 为空属合法），无 ok 轮
+		story.writer.recordDataStatus({ turnSeq: 1, status: "failed", attempts: 3, error: "校验失败" });
+		const snap = openSnapshotsDb(snapshotsDbPath(story.path)); // 空 snapshots.db
+
+		let current: StoryDbHandle = story;
+		const hooks = createSnapshotHooks({
+			snapshotsDb: snap,
+			getStoryDb: () => current,
+			setStoryDb: (db) => {
+				current = db;
+			},
+			getEntryAncestors: () => [],
+		});
+
+		hooks.sessionBeforeTree(bt("e1"), fakeCtx);
+		hooks.sessionTree(tt("e1"), fakeCtx);
+
+		assert.equal(hooks.state.lastRestoreResult?.ok, true, "全 failed → 空库兜底放行（§3.1）");
+		assert.equal(current.reader.listEvents().length, 0, "空库兜底 = 故事初始态");
 		snap.close();
 	} finally {
 		cleanupTempDir(dir);

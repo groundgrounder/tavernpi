@@ -139,3 +139,12 @@ export interface DirectiveRow {
 	content: string;
 	status: "active" | "done" | "revoked";
 }
+
+/** data subagent 落库状态（§6.1 失败路径持久化；PK turn_seq）。
+ *  status：ok = 落库成功；failed = 本轮失败待补；compensated = 后续轮补齐（含本轮事实）。 */
+export interface DataStatusRow {
+	turn_seq: number;
+	status: "ok" | "failed" | "compensated";
+	attempts: number;
+	error: string | null;
+}

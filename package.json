@@ -22,7 +22,8 @@
     "typecheck": "tsc -p packages/core/tsconfig.json && tsc -p packages/app/tsconfig.json",
     "test": "node --test \"packages/core/test/**/*.test.ts\"",
     "m1:cli": "node packages/app/src/m1-cli.ts",
-    "m1:accept": "node packages/app/acceptance/m1.ts"
+    "m1:accept": "node packages/app/acceptance/m1.ts",
+    "m2:cli": "node packages/app/src/m2-cli.ts"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

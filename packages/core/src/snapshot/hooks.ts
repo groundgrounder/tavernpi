@@ -85,21 +85,31 @@ export function createSnapshotHooks(options: SnapshotHooksOptions): SnapshotHook
 			return;
 		}
 
-		// 祖先链无快照。区分两种语义（§3.1 + M1-P2 gate m3 + Lane3 接线修正）：
+		// 祖先链无快照。区分三种语义（§3.1 + M1-P2 gate m3 + M2 修订）：
 		// - 快照库非空但本链无快照（如导航到首个 user 条目 u1，链上只有 [u1, root]）：
 		//   正常「重做开头」语义——空库兜底 = 故事初始态（reconciliation 裁决）；
-		// - 故事已有历史（turn_log 非空）且 snapshots.db 全空（外部损伤场景）：判恢复失败，
-		//   拒绝静默擦成空库。
+		// - 故事已有历史（turn_log 非空）且 snapshots.db 全空：再分两种——
+		//   · data_status 存在 status=ok 的轮（有成功落库轮却无任何快照）= 外部损伤，拒绝静默擦空库；
+		//   · data_status 全 failed/空（M2 合法态：data 失败轮不拍快照，§6.1）= 放行空库兜底。
 		const turnLogCount = options.getStoryDb().reader.getTurnLog().length;
 		const snapshotCount = options.snapshotsDb.listSnapshots().length;
 		if (turnLogCount > 0 && snapshotCount === 0) {
-			const message = `祖先链无快照但 turn_log 非空且 snapshots.db 为空（turn_log ${turnLogCount} 轮）——疑似外部损伤，拒绝空库兜底，保持当前库不动`;
-			pending = { kind: "failed", error: message };
-			pushWarning(message);
-			return;
+			const dataStatus = options.getStoryDb().reader.listDataStatus();
+			const hasOkTurn = dataStatus.some((r) => r.status === "ok");
+			if (hasOkTurn) {
+				const message = `祖先链无快照但 turn_log 非空且 snapshots.db 为空（turn_log ${turnLogCount} 轮，data_status 存在 ok 轮）——疑似外部损伤，拒绝空库兜底，保持当前库不动`;
+				pending = { kind: "failed", error: message };
+				pushWarning(message);
+				return;
+			}
+			// 全 failed/无 data 记录：M2 合法态（data 失败轮不拍快照），落到空库兜底。
 		}
 		pending = { kind: "empty" };
-		const message = `未找到 entry ${targetId} 祖先链上的快照，本次导航恢复走空库兜底（§3.1）`;
+		const failedPending = options.getStoryDb().reader.listDataStatus().filter((r) => r.status === "failed").length;
+		const message =
+			failedPending > 0
+				? `未找到 entry ${targetId} 祖先链上的快照，本次导航恢复走空库兜底（§3.1；data_status 有 ${failedPending} 轮 failed，属合法态，§6.1）`
+				: `未找到 entry ${targetId} 祖先链上的快照，本次导航恢复走空库兜底（§3.1）`;
 		pushWarning(message);
 	};
 

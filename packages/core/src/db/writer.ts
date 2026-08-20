@@ -7,6 +7,7 @@ import { DatabaseSync } from "node:sqlite";
 import {
 	DEFAULT_STORY_CLOCK,
 	PLAYER_LOCATION_KEY,
+	type DataStatusRow,
 	type DirectiveRow,
 	type EventRow,
 	type LocationLogRow,
@@ -52,6 +53,35 @@ export class DbWriter {
 
 	constructor(db: DatabaseSync) {
 		this.db = db;
+	}
+
+	/**
+	 * 事务执行器（applyChangeset 原子性前提）。node:sqlite DatabaseSync 有 isTransaction 属性：
+	 * 已在事务内 → SAVEPOINT/RELEASE（可嵌套，异常 ROLLBACK TO 保留外层事务）；
+	 * 否则 BEGIN/COMMIT，异常 ROLLBACK。
+	 */
+	transaction<T>(fn: () => T): T {
+		if (this.db.isTransaction) {
+			this.db.exec("SAVEPOINT sp_tavernpi");
+			try {
+				const result = fn();
+				this.db.exec("RELEASE sp_tavernpi");
+				return result;
+			} catch (err) {
+				this.db.exec("ROLLBACK TO sp_tavernpi");
+				this.db.exec("RELEASE sp_tavernpi");
+				throw err;
+			}
+		}
+		this.db.exec("BEGIN");
+		try {
+			const result = fn();
+			this.db.exec("COMMIT");
+			return result;
+		} catch (err) {
+			this.db.exec("ROLLBACK");
+			throw err;
+		}
 	}
 
 	// ------------------------------------------------------------------
@@ -243,8 +273,8 @@ export class DbWriter {
 			fromLocation = npc.current_location;
 		}
 
-		this.db.exec("BEGIN");
-		try {
+		// 原子：location_log + 目标表更新在单事务内（经 transaction()，嵌套调用走 SAVEPOINT）。
+		this.transaction(() => {
 			this.db
 				.prepare(
 					"INSERT INTO location_log (turn_seq, subject, from_location, to_location, note) VALUES (?, ?, ?, ?, ?)",
@@ -260,11 +290,7 @@ export class DbWriter {
 			} else {
 				this.db.prepare("UPDATE npcs SET current_location = ? WHERE id = ?").run(input.toLocationId, parsed.npcId);
 			}
-			this.db.exec("COMMIT");
-		} catch (err) {
-			this.db.exec("ROLLBACK");
-			throw err;
-		}
+		});
 		return this.getLatestLocationLogRow(input.turnSeq, input.subject);
 	}
 
@@ -397,6 +423,39 @@ export class DbWriter {
 			narrative_text: input.narrativeText,
 			raw_text: input.rawText ?? null,
 		};
+	}
+
+	/**
+	 * 记录 data subagent 落库状态（§6.1 失败路径持久化；PK turn_seq，upsert）。
+	 * 成功/失败均记录：attempts = 本轮落库尝试次数（重试耗尽或成功时定格），error = 失败原因。
+	 */
+	recordDataStatus(input: {
+		turnSeq: number;
+		status: "ok" | "failed";
+		attempts: number;
+		error?: string;
+	}): DataStatusRow {
+		assertTurnSeq(input.turnSeq);
+		this.db
+			.prepare(
+				`INSERT INTO data_status (turn_seq, status, attempts, error) VALUES (?, ?, ?, ?)
+				 ON CONFLICT(turn_seq) DO UPDATE SET
+				   status = excluded.status, attempts = excluded.attempts, error = excluded.error`,
+			)
+			.run(input.turnSeq, input.status, input.attempts, input.error ?? null);
+		return {
+			turn_seq: input.turnSeq,
+			status: input.status,
+			attempts: input.attempts,
+			error: input.error ?? null,
+		};
+	}
+
+	/** 把全部 failed 轮标记为 compensated（后续轮补齐落库后调用）。
+	 *  无 turn_seq 列写入，属更新类方法（同 updateNpcStatus）。返回受影响行数。 */
+	markFailedTurnsCompensated(): number {
+		const res = this.db.prepare("UPDATE data_status SET status = 'compensated' WHERE status = 'failed'").run();
+		return Number(res.changes);
 	}
 
 	// ------------------------------------------------------------------

@@ -162,3 +162,20 @@ export const CORE_V2_ALTERS: ReadonlyArray<{ table: string; column: string; sql:
 		sql: "ALTER TABLE events ADD COLUMN location_id INTEGER REFERENCES locations(id)",
 	},
 ];
+
+/**
+ * v3「data-status」（§6.1 失败路径持久化）——新表部分。
+ * data subagent 每轮落库状态：ok / failed（本轮失败待补）/ compensated（后续轮补齐）。
+ * 快照 guard（snapshot/hooks.ts）用它在「有成功落库轮却无快照」与「全 failed 合法态」之间裁决。
+ */
+export const CORE_V3_DATA_STATUS_SQL = `
+-- ---------- data subagent 落库状态（§6.1 / §7 M2） ----------
+-- turn_seq PK：每轮一行。attempts = 该轮落库尝试次数；error = 失败原因摘要（成功为 NULL）。
+-- 约束用 CHECK 封闭 status 取值（防手写 SQL 绕过类型层）。
+CREATE TABLE IF NOT EXISTS data_status (
+  turn_seq INTEGER PRIMARY KEY,
+  status TEXT NOT NULL CHECK (status IN ('ok', 'failed', 'compensated')),
+  attempts INTEGER NOT NULL DEFAULT 1,
+  error TEXT
+);
+`;

@@ -41,10 +41,11 @@ test("v1 库原地升 v2：旧数据不动、新表/新列齐全、重复 open/m
 	const dbPath = join(dir, "story.db");
 	const db = buildV1Db(dbPath);
 	try {
-		// 升级：仅补 v2
+		// 升级：仅补 v2（v3 紧随其后；v1 已记录跳过）
 		const applied = migrate(db);
-		assert.deepEqual(applied, ["v2_spatial_primitives"]);
+		assert.deepEqual(applied, ["v2_spatial_primitives", "v3_data_status"]);
 		assert.ok(hasMigration(db, "v2_spatial_primitives"));
+		assert.ok(hasMigration(db, "v3_data_status"));
 
 		// 新表存在
 		const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map(
@@ -87,12 +88,12 @@ test("v1 库原地升 v2：旧数据不动、新表/新列齐全、重复 open/m
 	}
 });
 
-test("新库（无 v1 记录）直接建到 v2：v1+v2 顺序应用", () => {
+test("新库（无 v1 记录）直接建到当前版本：v1+v2+v3 顺序应用", () => {
 	const dir = makeTempDir();
 	const db = new DatabaseSync(join(dir, "story.db"));
 	try {
 		const applied = migrate(db);
-		assert.deepEqual(applied, ["v1_core_schema", "v2_spatial_primitives"]);
+		assert.deepEqual(applied, ["v1_core_schema", "v2_spatial_primitives", "v3_data_status"]);
 		const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map(
 			(r) => r.name,
 		);

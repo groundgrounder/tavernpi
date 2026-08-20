@@ -1,6 +1,6 @@
 // tavernpi-core 对外导出收敛（创作规划 §10.2 API 承诺面的源头）。
 // M1-P1：故事 DB 层；M1-P2：快照管理器（§3.1 ★承重机制）；M2-P1：提示词分层/subagent 运行时/
-// pipeline 事件流/模型配置最小形态。
+// pipeline 事件流/模型配置最小形态；M2-P2：data subagent（§6.1）+ StoryRuntime 编排器（§10.2）。
 
 export const CORE_VERSION = "0.0.0";
 
@@ -28,6 +28,7 @@ export {
 	DEFAULT_STORY_CLOCK,
 	PLAYER_LOCATION_KEY,
 	parseLocationId,
+	type DataStatusRow,
 	type DirectiveRow,
 	type EventRow,
 	type LocationLogRow,
@@ -44,7 +45,7 @@ export {
 } from "./db/types.ts";
 
 // schema 常量（迁移测试/卡包工具可用）
-export { CORE_SCHEMA_SQL, CORE_V2_ALTERS, CORE_V2_SPATIAL_SQL } from "./db/schema.ts";
+export { CORE_SCHEMA_SQL, CORE_V2_ALTERS, CORE_V2_SPATIAL_SQL, CORE_V3_DATA_STATUS_SQL } from "./db/schema.ts";
 
 // 快照管理器（§3.1 ★）
 export {
@@ -121,3 +122,35 @@ export {
 	type TavernModels,
 	type TavernSettings,
 } from "./settings.ts";
+
+// data subagent 变更集（§6.1）
+export {
+	applyChangeset,
+	CHANGELOG_JSON_SCHEMA,
+	changesetZodSchema,
+	validateChangesetSemantics,
+	type ApplySummary,
+	type Changeset,
+} from "./pipeline/changeset.ts";
+
+// DB 摘要渲染（§5.2）
+export { renderDbSummary } from "./pipeline/db-summary.ts";
+
+// data subagent 编排（§6.1）
+export {
+	DATA_OUTPUT_TOOL_NAME,
+	runDataStage,
+	type DataStageInput,
+	type DataStageOptions,
+	type DataStageOutcome,
+} from "./pipeline/data-stage.ts";
+
+// StoryRuntime 编排器（§10.2 API 面 M2 形态）
+export {
+	computeNextTurnSeq,
+	createStoryRuntime,
+	type StoryRuntime,
+	type StoryRuntimeOptions,
+	type StoryState,
+	type TurnResult,
+} from "./pipeline/runtime.ts";

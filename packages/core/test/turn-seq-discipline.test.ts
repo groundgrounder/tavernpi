@@ -110,6 +110,21 @@ test("upsertClock 是单例安全入口（turn_seq 纪律的显式例外）", ()
 	}
 });
 
+test("recordDataStatus：缺 turnSeq 运行时抛错（turn_seq 纪律覆盖 data_status）", () => {
+	const dir = makeTempDir();
+	try {
+		const story = openTempStory(dir);
+		const writer = story.writer as unknown as {
+			recordDataStatus: (input: { turnSeq?: number; status: "ok" | "failed"; attempts: number }) => unknown;
+		};
+		assert.throws(() => writer.recordDataStatus({ status: "ok", attempts: 1 }), /turn_seq 纪律/);
+		assert.throws(() => writer.recordDataStatus({ turnSeq: -1, status: "ok", attempts: 1 }), /turn_seq 纪律/);
+		story.close();
+	} finally {
+		cleanupTempDir(dir);
+	}
+});
+
 test("写入后可读回：events / time_log / world_state / npc 复合 / turn_log / directives", () => {
 	const dir = makeTempDir();
 	try {

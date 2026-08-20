@@ -4,6 +4,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { PLAYER_LOCATION_KEY } from "./types.ts";
 import type {
+	DataStatusRow,
 	DirectiveRow,
 	EventRow,
 	LocationLogRow,
@@ -213,6 +214,13 @@ export class DbReader {
 				.all(status) as unknown as DirectiveRow[];
 		}
 		return this.db.prepare("SELECT id, turn_seq, content, status FROM directives ORDER BY id").all() as unknown as DirectiveRow[];
+	}
+
+	/** data subagent 落库状态全表读（§6.1；按 turn_seq 升序）。 */
+	listDataStatus(): DataStatusRow[] {
+		return this.db
+			.prepare("SELECT turn_seq, status, attempts, error FROM data_status ORDER BY turn_seq")
+			.all() as unknown as DataStatusRow[];
 	}
 }
 

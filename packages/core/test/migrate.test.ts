@@ -7,13 +7,13 @@ import { DatabaseSync } from "node:sqlite";
 import { cleanupTempDir, makeTempDir } from "./helpers.ts";
 import { CORE_MIGRATIONS, hasMigration, migrate, type Migration } from "../src/db/migrate.ts";
 
-test("migrate 首次应用 v1 + v2，重复调用幂等（无副作用、返回空）", () => {
+test("migrate 首次应用 v1+v2+v3，重复调用幂等（无副作用、返回空）", () => {
 	const dir = makeTempDir();
 	const dbPath = join(dir, "story.db");
 	const db = new DatabaseSync(dbPath);
 	try {
 		const first = migrate(db);
-		assert.deepEqual(first, ["v1_core_schema", "v2_spatial_primitives"]);
+		assert.deepEqual(first, ["v1_core_schema", "v2_spatial_primitives", "v3_data_status"]);
 
 		// 幂等：二次调用不再执行任何迁移
 		const second = migrate(db);
@@ -38,6 +38,7 @@ test("migrate 首次应用 v1 + v2，重复调用幂等（无副作用、返回�
 			"directives",
 			"locations",
 			"location_log",
+			"data_status",
 		]) {
 			assert.ok(tables.includes(t), `表 ${t} 应存在`);
 		}
@@ -63,7 +64,7 @@ test("migrate 注册额外命名迁移：仅执行未应用的，且顺序在 co
 			up: (d) => d.exec("CREATE TABLE IF NOT EXISTS card_pack_v1 (id INTEGER PRIMARY KEY, note TEXT)"),
 		};
 		const applied = migrate(db, [extra]);
-		assert.deepEqual(applied, ["v1_core_schema", "v2_spatial_primitives", "card_pack_v1"]);
+		assert.deepEqual(applied, ["v1_core_schema", "v2_spatial_primitives", "v3_data_status", "card_pack_v1"]);
 		assert.ok(hasMigration(db, "card_pack_v1"));
 
 		// 再次执行（含同额外迁移）不再应用任何
