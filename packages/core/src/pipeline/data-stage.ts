@@ -11,7 +11,7 @@ import type { StoryDb } from "../db/story-db.ts";
 import { runSubagent, type SubagentOutputTool, type SubagentResult, type SubagentRunOptions, type SubagentUsage } from "../subagent/runtime.ts";
 import type { PipelineEventLog } from "./events.ts";
 import { renderDbSummary } from "./db-summary.ts";
-import { applyChangeset, changesetZodSchema, CHANGELOG_JSON_SCHEMA, type ApplySummary } from "./changeset.ts";
+import { applyChangeset, changesetZodSchema, CHANGELOG_JSON_SCHEMA, filterConflictingItems, validateChangesetSemantics, type ApplySummary } from "./changeset.ts";
 import { renderOffscreenDeltasForData, type OffscreenDelta } from "./npc-stage.ts";
 
 /** data subagent 的输出工具名（唯一白名单工具；constrainedSampling 强制 JSON 结构输出）。 */
@@ -33,6 +33,8 @@ export interface DataStageInput {
 	pendingTurns: Array<{ turnSeq: number; userInput: string; narrativeText: string }>;
 	/** 离线 NPC 推演结构化产物（§6.2 npc 层；data 是唯一写者，须照实转写落库）。空/缺省不加节。 */
 	offscreenDeltas?: OffscreenDelta[];
+	/** 场景卡时间建议（§6.3 场景分析 → §5.3 流转链路）；非空时 userPrompt 加节供 time_advance 参考。 */
+	timeSuggestion?: { estimate: string; toTime: string };
 }
 
 export interface DataStageOptions {
@@ -47,10 +49,21 @@ export interface DataStageOptions {
 	maxAttempts?: number;
 	/** 缺省 runSubagent；测试/验收故障注入通道。 */
 	executor?: (opts: SubagentRunOptions) => Promise<SubagentResult<unknown>>;
+	/** 严格放行（§6.3 超限轮）：true 时语义问题不整轮重试，而是 filterConflictingItems 剔除问题项后
+	 *  应用其余（剔除项记入 outcome.dropped）；zod 形状错误仍走原重试。false/缺省 = M2 形态逐字不变。 */
+	strictDrop?: boolean;
 }
 
 export type DataStageOutcome =
-	| { ok: true; attempts: number; applied: ApplySummary; usage: SubagentUsage; durationMs: number }
+	| {
+			ok: true;
+			attempts: number;
+			applied: ApplySummary;
+			usage: SubagentUsage;
+			durationMs: number;
+			/** strictDrop 放行轮被剔除的冲突项（非空表示本轮超限放行）。 */
+			dropped?: Array<{ item: string; message: string }>;
+	  }
 	| { ok: false; attempts: number; error: string; durationMs: number };
 
 const ZERO_USAGE: SubagentUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, costTotal: 0 };
@@ -84,6 +97,11 @@ function buildUserPrompt(storyDb: StoryDb, input: DataStageInput): string {
 	}
 	if (input.offscreenDeltas !== undefined && input.offscreenDeltas.length > 0) {
 		parts.push(`## 离线 NPC 推演产物\n${renderOffscreenDeltasForData(input.offscreenDeltas, storyDb)}`);
+	}
+	if (input.timeSuggestion !== undefined && (input.timeSuggestion.estimate.trim() !== "" || input.timeSuggestion.toTime.trim() !== "")) {
+		parts.push(
+			`## 场景时间建议\n场景分析估计本轮时间跨度为「${input.timeSuggestion.estimate}」，建议推进至「${input.timeSuggestion.toTime}」；据此给出 time_advance，可有依据地调整。`,
+		);
 	}
 	parts.push(`## 指令\n${TASK_INSTRUCTIONS}`);
 	return parts.join("\n\n");
@@ -123,25 +141,73 @@ export async function runDataStage(opts: DataStageOptions): Promise<DataStageOut
 					.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
 					.join("; ")}`;
 			} else {
-				try {
-					const applied = applyChangeset(storyDb, parsed.data, {
-						turnSeq: input.turnSeq,
-						createdEntryId: input.createdEntryId,
-					});
-					eventLog?.record({
-						ts: new Date().toISOString(),
-						turnSeq: input.turnSeq,
-						role: "data",
-						ok: true,
-						attempt,
-						durationMs: Date.now() - attemptStartedAt,
-						usage,
-						inputChars: userPrompt.length,
-						outputChars,
-					});
-					return { ok: true, attempts: attempt, applied, usage, durationMs: Date.now() - startedAt };
-				} catch (applyErr) {
-					error = `第 ${attempt} 次提交未通过语义校验/应用: ${applyErr instanceof Error ? applyErr.message : String(applyErr)}`;
+				// §6.3 strictDrop（超限放行轮）：语义问题不整轮重试，剔除问题项后应用其余；zod 形状错误不受影响。
+				const problems = validateChangesetSemantics(storyDb, parsed.data);
+				if (problems.length > 0 && opts.strictDrop) {
+					const { filtered, dropped } = filterConflictingItems(parsed.data, problems);
+					const still = validateChangesetSemantics(storyDb, filtered);
+					if (still.length > 0) {
+						error = `第 ${attempt} 次提交未通过语义校验（strictDrop 剔除后仍残留 ${still.length} 项）: ${still
+							.map((p) => `${p.item}: ${p.message}`)
+							.join("; ")}`;
+					} else {
+						try {
+							const applied = applyChangeset(storyDb, filtered, {
+								turnSeq: input.turnSeq,
+								createdEntryId: input.createdEntryId,
+							});
+							eventLog?.record({
+								ts: new Date().toISOString(),
+								turnSeq: input.turnSeq,
+								role: "data",
+								ok: true,
+								attempt,
+								durationMs: Date.now() - attemptStartedAt,
+								usage,
+								inputChars: userPrompt.length,
+								outputChars,
+								error: `strictDrop 剔除 ${dropped.length} 项（超限放行轮）: ${dropped
+									.map((d) => `${d.item}: ${d.message}`)
+									.join("; ")}`,
+							});
+							return {
+								ok: true,
+								attempts: attempt,
+								applied,
+								usage,
+								durationMs: Date.now() - startedAt,
+								dropped: dropped.map((d) => ({ item: d.item, message: d.message })),
+							};
+						} catch (applyErr) {
+							error = `第 ${attempt} 次应用失败: ${applyErr instanceof Error ? applyErr.message : String(applyErr)}`;
+						}
+					}
+				} else if (problems.length > 0) {
+					// 与原 applyChangeset 抛错文案逐字一致（M2 形态不变）
+					error = `第 ${attempt} 次提交未通过语义校验/应用: 变更集校验失败（${problems.length} 个问题）:\n${problems
+						.map((p) => `- ${p.item}: ${p.message}`)
+						.join("\n")}`;
+				} else {
+					try {
+						const applied = applyChangeset(storyDb, parsed.data, {
+							turnSeq: input.turnSeq,
+							createdEntryId: input.createdEntryId,
+						});
+						eventLog?.record({
+							ts: new Date().toISOString(),
+							turnSeq: input.turnSeq,
+							role: "data",
+							ok: true,
+							attempt,
+							durationMs: Date.now() - attemptStartedAt,
+							usage,
+							inputChars: userPrompt.length,
+							outputChars,
+						});
+						return { ok: true, attempts: attempt, applied, usage, durationMs: Date.now() - startedAt };
+					} catch (applyErr) {
+						error = `第 ${attempt} 次提交未通过语义校验/应用: ${applyErr instanceof Error ? applyErr.message : String(applyErr)}`;
+					}
 				}
 			}
 		} catch (err) {

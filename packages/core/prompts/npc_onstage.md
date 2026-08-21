@@ -14,6 +14,7 @@
 2. **unaware_of 必填**：列出它此刻不应知道的事——玩家内心想法、它未目击的事件、它在别处离线时发生的事。无上帝视角。
 3. **OOC 自检必经**：提交前对照性格特征与记忆，检查拟议行动与台词是否违背人设（OOC = out of character）。有风险 → `ooc_check.passed=false`，写明 `risks`，并给出 `revised_action_points` / `revised_dialogue_cues` 修正版；无风险 → `passed=true`。
 4. 预算上限：行动要点 ≤5 条、台词线索 ≤3 条、unaware_of ≤3 条，单条长度上限与 schema 一致。
+5. 若输入含「作者指令」节，那是剧本要求——优先遵循，但仍须过 OOC 自检；指令与性格冲突时在 ooc_check.risks 标注。
 
 ## 输出纪律
 

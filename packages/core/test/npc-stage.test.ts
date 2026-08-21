@@ -262,6 +262,59 @@ test("runOnstageRehearsals：npc_id 串台（返回别人的 id）→ 重试 →
 	}
 });
 
+test("runOnstageRehearsals：directives 非空 → 预演 userPrompt 含「作者指令」节（§6.3 下达）", async () => {
+	const dir = makeTempDir();
+	try {
+		const story = openTempStory(dir);
+		const ids = seedNpcStageStory(story);
+		const plan = computeScenePlan(story, 5); // onstage = [艾琳]
+
+		const prompts: string[] = [];
+		const executor = async (opts: SubagentRunOptions) => {
+			prompts.push(opts.userPrompt);
+			return stubResult(validRehearsal(requestedNpcId(opts.userPrompt)));
+		};
+
+		const directives = ["梅子酒今晚卖完就收摊", "不得与玩家起正面冲突"];
+		const result = await runOnstageRehearsals(plan.onstage, 5, "玩家走进来", { storyDb: story, cwd: dir, executor, directives });
+		assert.equal(result.length, 1);
+		assert.equal(prompts.length, 1);
+		assert.match(prompts[0]!, /## 作者指令（剧本要求）/);
+		for (const d of directives) {
+			assert.ok(prompts[0]!.includes(d), `指令「${d}」逐条列出`);
+		}
+		// 指令节在玩家输入之后、指令节之前
+		const userIdx = prompts[0]!.indexOf("## 本轮玩家输入");
+		const authorIdx = prompts[0]!.indexOf("## 作者指令");
+		assert.ok(userIdx !== -1 && authorIdx > userIdx);
+		story.close();
+	} finally {
+		cleanupTempDir(dir);
+	}
+});
+
+test("runOnstageRehearsals：directives 缺省 → 预演 userPrompt 不含作者指令节（M3 形态不变）", async () => {
+	const dir = makeTempDir();
+	try {
+		const story = openTempStory(dir);
+		const ids = seedNpcStageStory(story);
+		const plan = computeScenePlan(story, 5);
+
+		let prompt = "";
+		const executor = async (opts: SubagentRunOptions) => {
+			prompt = opts.userPrompt;
+			return stubResult(validRehearsal(requestedNpcId(opts.userPrompt)));
+		};
+
+		const result = await runOnstageRehearsals(plan.onstage, 5, "玩家走进来", { storyDb: story, cwd: dir, executor });
+		assert.equal(result.length, 1);
+		assert.doesNotMatch(prompt, /作者指令/);
+		story.close();
+	} finally {
+		cleanupTempDir(dir);
+	}
+});
+
 // ---------------------------------------------------------------------------
 // 离线批量推演（runOffscreenBatch）
 // ---------------------------------------------------------------------------

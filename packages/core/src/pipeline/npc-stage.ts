@@ -180,6 +180,8 @@ export interface NpcStageOptions {
 	maxAttempts?: number;
 	/** 缺省 runSubagent；测试/验收故障注入通道。 */
 	executor?: (opts: SubagentRunOptions) => Promise<SubagentResult<unknown>>;
+	/** 活跃作者指令（§6.3 场景分析 → npc 下达；剧本要求，预演须优先遵循但仍过 OOC 自检）。 */
+	directives?: string[];
 }
 
 const ZERO_USAGE: SubagentUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, costTotal: 0 };
@@ -204,8 +206,14 @@ const OFFSCREEN_INSTRUCTIONS = [
 // 提示词组装
 // ---------------------------------------------------------------------------
 
-/** 单个在场 NPC 的预演 userPrompt：档案 + 场景上下文 + 玩家输入 + 任务指令。 */
-function buildRehearsalUserPrompt(storyDb: StoryDb, npc: NpcRow, turnSeq: number, userInput: string): string {
+/** 单个在场 NPC 的预演 userPrompt：档案 + 场景上下文 + 玩家输入 + 作者指令（可选）+ 任务指令。 */
+function buildRehearsalUserPrompt(
+	storyDb: StoryDb,
+	npc: NpcRow,
+	turnSeq: number,
+	userInput: string,
+	directives?: string[],
+): string {
 	const composite = storyDb.reader.getNpc(npc.id);
 	const traitsText = composite.traits.map((t) => `${t.trait}=${t.weight}`).join(", ") || "(无)";
 	const memoriesText =
@@ -227,6 +235,9 @@ function buildRehearsalUserPrompt(storyDb: StoryDb, npc: NpcRow, turnSeq: number
 	parts.push(`关系[${relationsText}]`);
 	parts.push(`## 场景上下文（turn ${turnSeq}）\n${renderDbSummary(storyDb, { recentEvents: 5 })}`);
 	parts.push(`## 本轮玩家输入\n${userInput}`);
+	if (directives !== undefined && directives.length > 0) {
+		parts.push(`## 作者指令（剧本要求）\n${directives.map((d) => `- ${d}`).join("\n")}`);
+	}
 	parts.push(`## 指令\n${REHEARSAL_INSTRUCTIONS}`);
 	return parts.join("\n\n");
 }
@@ -284,7 +295,7 @@ async function runOneRehearsal(
 	const systemPrompt = renderPlaceholders(loadPrompt("npc_onstage", opts.prompts).content, {
 		npc_name: npc.name,
 	}).text;
-	let userPrompt = buildRehearsalUserPrompt(opts.storyDb, npc, turnSeq, userInput);
+	let userPrompt = buildRehearsalUserPrompt(opts.storyDb, npc, turnSeq, userInput, opts.directives);
 
 	for (let attempt = 1; attempt <= opts.maxAttempts; attempt++) {
 		const attemptStartedAt = Date.now();

@@ -1,6 +1,8 @@
 // data subagent 编排单测（executor 桩，全程无真实 LLM）：一次成功、首败自纠、
 // 恒败耗尽、executor 抛错重试、pendingTurns 注入、eventLog 每次 attempt 记录、
-// offscreenDeltas 注入（§6.2 npc 层产物转写输入；空/缺省不加节）。
+// offscreenDeltas 注入（§6.2 npc 层产物转写输入；空/缺省不加节）、
+// strictDrop（§6.3 超限放行：语义问题剔除后应用、zod 形状仍重试、缺省 M2 形态不变）、
+// timeSuggestion（§6.3 场景卡时间建议进 userPrompt）。
 
 import assert from "node:assert/strict";
 import { join } from "node:path";
@@ -244,7 +246,156 @@ test("runDataStage：offscreenDeltas 缺省/空 → userPrompt 不含离线区�
 	}
 });
 
-test("runDataStage：eventLog 每次 attempt 有记录（成功 1 条 / 多轮失败逐条）", async () => {
+test("runDataStage：strictDrop 模式——语义问题项被剔除、其余落库、dropped 记录、不重试该轮", async () => {
+	const dir = makeTempDir();
+	try {
+		const story = openTempStory(dir);
+		let calls = 0;
+		// events[1].location_name「未知地点」未登记 → 语义问题项；events[0] 合法
+		const mixed = {
+			events: [
+				{ summary: "城门洞开", location_name: "王城" },
+				{ summary: "坏事件", location_name: "未知地点" },
+			],
+			new_locations: [{ name: "王城" }],
+			time_advance: { to_time: "0000-01-02", span_note: "一日" },
+		};
+		const outcome = await runDataStage({
+			storyDb: story,
+			input: { turnSeq: 1, userInput: "u", narrativeText: "n", pendingTurns: [] },
+			cwd: dir,
+			strictDrop: true,
+			executor: async () => {
+				calls++;
+				return result(mixed);
+			},
+		});
+		assert.equal(outcome.ok, true, "strictDrop 放行");
+		if (outcome.ok) {
+			assert.equal(outcome.attempts, 1, "语义问题不重试该轮");
+			assert.equal(outcome.applied.events, 1, "仅合法事件落库");
+			assert.equal(outcome.applied.newLocations, 1);
+			assert.equal(outcome.applied.timeAdvanced, true);
+			assert.equal(outcome.dropped?.length, 1, "dropped 记录剔除项");
+			assert.equal(outcome.dropped?.[0]?.item, "events[1]");
+			assert.match(outcome.dropped?.[0]?.message ?? "", /未知地点/);
+		}
+		assert.equal(calls, 1, "全程只调用一次 executor（不重试）");
+		// 落库可见：只有合法事件
+		assert.equal(story.reader.listEvents().length, 1);
+		assert.equal(story.reader.listEvents()[0]?.summary, "城门洞开");
+		story.close();
+	} finally {
+		cleanupTempDir(dir);
+	}
+});
+
+test("runDataStage：strictDrop 模式——zod 形状错误仍走原重试", async () => {
+	const dir = makeTempDir();
+	try {
+		const story = openTempStory(dir);
+		let call = 0;
+		const outcome = await runDataStage({
+			storyDb: story,
+			input: { turnSeq: 1, userInput: "u", narrativeText: "n", pendingTurns: [] },
+			cwd: dir,
+			strictDrop: true,
+			executor: async () => {
+				call++;
+				if (call === 1) return result({ events: [{ summary: 123 }] }); // zod 形状非法
+				return result(validChangeset);
+			},
+		});
+		assert.equal(outcome.ok, true);
+		if (outcome.ok) {
+			assert.equal(outcome.attempts, 2, "zod 错误不受 strictDrop 影响，仍重试");
+			assert.equal(outcome.dropped, undefined, "正常路径无 dropped");
+		}
+		assert.equal(story.reader.listEvents().length, 1);
+		story.close();
+	} finally {
+		cleanupTempDir(dir);
+	}
+});
+
+test("runDataStage：strictDrop 缺省 → M2 形态不变（语义问题整轮重试耗尽 → ok:false、零写入）", async () => {
+	const dir = makeTempDir();
+	try {
+		const story = openTempStory(dir);
+		const maxAttempts = 3;
+		const mixed = {
+			events: [
+				{ summary: "城门洞开", location_name: "王城" },
+				{ summary: "坏事件", location_name: "未知地点" },
+			],
+			new_locations: [{ name: "王城" }],
+			time_advance: { to_time: "0000-01-02" },
+		};
+		const outcome = await runDataStage({
+			storyDb: story,
+			input: { turnSeq: 1, userInput: "u", narrativeText: "n", pendingTurns: [] },
+			cwd: dir,
+			maxAttempts,
+			executor: async () => result(mixed),
+		});
+		assert.equal(outcome.ok, false, "缺省 strictDrop → 语义问题不剔除，整轮失败");
+		if (!outcome.ok) {
+			assert.equal(outcome.attempts, maxAttempts);
+			assert.match(outcome.error, /未知地点/);
+		}
+		assert.equal(story.reader.listEvents().length, 0, "全程失败 → 零写入（含合法项）");
+		story.close();
+	} finally {
+		cleanupTempDir(dir);
+	}
+});
+
+test("runDataStage：timeSuggestion 非空 → userPrompt 含场景时间建议节；缺省不含", async () => {
+	const dir = makeTempDir();
+	try {
+		const story = openTempStory(dir);
+		let prompt = "";
+		const outcome = await runDataStage({
+			storyDb: story,
+			input: {
+				turnSeq: 1,
+				userInput: "u",
+				narrativeText: "n",
+				pendingTurns: [],
+				timeSuggestion: { estimate: "几句话的工夫", toTime: "0000-01-02" },
+			},
+			cwd: dir,
+			executor: async (opts) => {
+				prompt = opts.userPrompt;
+				return result(validChangeset);
+			},
+		});
+		assert.equal(outcome.ok, true);
+		assert.match(prompt, /## 场景时间建议/);
+		assert.match(prompt, /几句话的工夫/);
+		assert.match(prompt, /建议推进至「0000-01-02」/);
+		story.close();
+
+		// 缺省不含该节
+		const story2 = openTempStory(dir);
+		let prompt2 = "";
+		await runDataStage({
+			storyDb: story2,
+			input: { turnSeq: 1, userInput: "u", narrativeText: "n", pendingTurns: [] },
+			cwd: dir,
+			executor: async (opts) => {
+				prompt2 = opts.userPrompt;
+				return result(validChangeset);
+			},
+		});
+		assert.doesNotMatch(prompt2, /场景时间建议/);
+		story2.close();
+	} finally {
+		cleanupTempDir(dir);
+	}
+});
+
+	test("runDataStage：eventLog 每次 attempt 有记录（成功 1 条 / 多轮失败逐条）", async () => {
 	const dir = makeTempDir();
 	try {
 		// 成功路径：1 条

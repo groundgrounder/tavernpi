@@ -1,7 +1,7 @@
 // tavernpi-core 对外导出收敛（创作规划 §10.2 API 承诺面的源头）。
 // M1-P1：故事 DB 层；M1-P2：快照管理器（§3.1 ★承重机制）；M2-P1：提示词分层/subagent 运行时/
 // pipeline 事件流/模型配置最小形态；M2-P2：data subagent（§6.1）+ StoryRuntime 编排器（§10.2）；
-// M3-P2：npc subagent 阶段（§6.2）接入 StoryRuntime 并导出公开面。
+// M3-P2：npc subagent 阶段（§6.2）接入 StoryRuntime；M4-P2：story 阶段（§6.3）+ stylize（§6.4）接入。
 
 export const CORE_VERSION = "0.0.0";
 
@@ -129,9 +129,11 @@ export {
 	applyChangeset,
 	CHANGELOG_JSON_SCHEMA,
 	changesetZodSchema,
+	filterConflictingItems,
 	validateChangesetSemantics,
 	type ApplySummary,
 	type Changeset,
+	type ChangesetProblem,
 } from "./pipeline/changeset.ts";
 
 // DB 摘要渲染（§5.2）
@@ -167,13 +169,56 @@ export {
 	type ScenePlan,
 } from "./pipeline/npc-stage.ts";
 
-// StoryRuntime 编排器（§10.2 API 面 M2 形态 + §6.2 npc 阶段）
+// story subagent（§6.3：场景分析 / 规则层轻检 / LLM 审查 / 全统筹 / 渲染器）
+export {
+	OVERSEE_JSON_SCHEMA,
+	OVERSEE_OUTPUT_TOOL_NAME,
+	REVIEW_JSON_SCHEMA,
+	REVIEW_OUTPUT_TOOL_NAME,
+	SCENE_CARD_JSON_SCHEMA,
+	SCENE_OUTPUT_TOOL_NAME,
+	buildFallbackSceneCard,
+	overseeZodSchema,
+	renderOverseeNote,
+	renderRevisionRequest,
+	renderSceneCardForNarrator,
+	reviewZodSchema,
+	runOversee,
+	runReview,
+	runRuleChecks,
+	runSceneAnalysis,
+	sceneCardZodSchema,
+	validateSceneCard,
+	type OverseeNote,
+	type ReviewFinding,
+	type RuleCheckInput,
+	type RuleCheckResult,
+	type SceneAnalysisResult,
+	type SceneCard,
+	type StoryStageOptions,
+} from "./pipeline/story-stage.ts";
+
+// stylize（§6.4：默认关闭的可选阶段；零事实漂移抽查）
+export {
+	STYLIZE_JSON_SCHEMA,
+	STYLIZE_OUTPUT_TOOL_NAME,
+	runStylize,
+	stylizeFactCheck,
+	stylizeZodSchema,
+	type StylizeOptions,
+	type StylizeOutput,
+} from "./pipeline/stylize-stage.ts";
+
+// StoryRuntime 编排器（§10.2 API 面 M2 形态 + §6.2 npc 阶段 + §6.3 story 阶段 + §6.4 stylize）
 export {
 	computeNextTurnSeq,
 	createStoryRuntime,
+	findUserEntryOnBranch,
 	type NpcStageRuntimeOptions,
 	type StoryRuntime,
 	type StoryRuntimeOptions,
+	type StoryStageRuntimeOptions,
 	type StoryState,
+	type StylizeRuntimeOptions,
 	type TurnResult,
 } from "./pipeline/runtime.ts";
