@@ -27,6 +27,7 @@
     "m3:cli": "node packages/app/src/m3-cli.ts",
     "m4:cli": "node packages/app/src/m4-cli.ts",
     "m3:accept": "node packages/app/acceptance/m3.ts",
+    "m4:accept": "node packages/app/acceptance/m4.ts",
     "m2:accept": "node packages/app/acceptance/m2.ts"
   },
   "devDependencies": {
