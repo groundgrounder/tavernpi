@@ -123,13 +123,15 @@ export interface NpcRelationRow {
 	turn_seq: number;
 }
 
-/** 每轮一致性记录。raw_text = stylize 前原文（未启用则同 narrative_text）。 */
+/** 每轮一致性记录。raw_text = stylize 前原文（未启用则同 narrative_text）。
+ *  warnings = §6.3 轻检/审查留痕（规则层硬冲突或 LLM 审查 findings 的文本摘要；可空，后补写）。 */
 export interface TurnLogRow {
 	turn_seq: number;
 	session_entry_id: string;
 	user_input: string;
 	narrative_text: string;
 	raw_text: string | null;
+	warnings: string | null;
 }
 
 /** 创造模式剧情大纲指令（作者意图，非世界事实）。status 封闭枚举。 */

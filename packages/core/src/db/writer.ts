@@ -396,18 +396,21 @@ export class DbWriter {
 	// 一致性
 	// ------------------------------------------------------------------
 
-	/** 记录每轮一致性条目（PK turn_seq，每轮一行）。rawText 缺省回退 narrativeText（stylize 语义，§6.4）。 */
+	/** 记录每轮一致性条目（PK turn_seq，每轮一行）。rawText 缺省回退 narrativeText（stylize 语义，§6.4）。
+	 *  warnings 可选：§6.3 轻检/审查留痕（规则层硬冲突或 LLM 审查 findings 摘要；轻检在记录后运行，
+	 *  警告后补写经 setTurnLogWarnings）。向后兼容：不传则 warnings 为 NULL。 */
 	recordTurnLog(input: {
 		turnSeq: number;
 		sessionEntryId: string;
 		userInput: string;
 		narrativeText: string;
 		rawText?: string;
+		warnings?: string;
 	}): TurnLogRow {
 		assertTurnSeq(input.turnSeq);
 		this.db
 			.prepare(
-				"INSERT INTO turn_log (turn_seq, session_entry_id, user_input, narrative_text, raw_text) VALUES (?, ?, ?, ?, ?)",
+				"INSERT INTO turn_log (turn_seq, session_entry_id, user_input, narrative_text, raw_text, warnings) VALUES (?, ?, ?, ?, ?, ?)",
 			)
 			.run(
 				input.turnSeq,
@@ -415,6 +418,7 @@ export class DbWriter {
 				input.userInput,
 				input.narrativeText,
 				input.rawText ?? null,
+				input.warnings ?? null,
 			);
 		return {
 			turn_seq: input.turnSeq,
@@ -422,7 +426,14 @@ export class DbWriter {
 			user_input: input.userInput,
 			narrative_text: input.narrativeText,
 			raw_text: input.rawText ?? null,
+			warnings: input.warnings ?? null,
 		};
+	}
+
+	/** 后补写 turn_log.warnings（§6.3：轻检/审查在 recordTurnLog 之后运行）。 */
+	setTurnLogWarnings(turnSeq: number, warnings: string): void {
+		assertTurnSeq(turnSeq);
+		this.db.prepare("UPDATE turn_log SET warnings = ? WHERE turn_seq = ?").run(warnings, turnSeq);
 	}
 
 	/**

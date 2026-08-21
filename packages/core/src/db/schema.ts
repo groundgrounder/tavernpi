@@ -179,3 +179,10 @@ CREATE TABLE IF NOT EXISTS data_status (
   error TEXT
 );
 `;
+
+/**
+ * v4「turn-log-warnings」（§6.3 契约「留痕（turn_log warning）」落地）——旧表补列。
+ * 轻检在 recordTurnLog 之后运行（ruleChecks/review 在主叙事后），警告后补写；可空。
+ * 走 v2 ALTER 先例：列存在性守卫幂等（migrate.ts 内处理）。
+ */
+export const CORE_V4_TURN_LOG_WARNINGS_SQL = "ALTER TABLE turn_log ADD COLUMN warnings TEXT";

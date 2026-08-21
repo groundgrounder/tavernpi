@@ -7,13 +7,13 @@ import { DatabaseSync } from "node:sqlite";
 import { cleanupTempDir, makeTempDir } from "./helpers.ts";
 import { CORE_MIGRATIONS, hasMigration, migrate, type Migration } from "../src/db/migrate.ts";
 
-test("migrate 首次应用 v1+v2+v3，重复调用幂等（无副作用、返回空）", () => {
+test("migrate 首次应用 v1~v4，重复调用幂等（无副作用、返回空）", () => {
 	const dir = makeTempDir();
 	const dbPath = join(dir, "story.db");
 	const db = new DatabaseSync(dbPath);
 	try {
 		const first = migrate(db);
-		assert.deepEqual(first, ["v1_core_schema", "v2_spatial_primitives", "v3_data_status"]);
+		assert.deepEqual(first, ["v1_core_schema", "v2_spatial_primitives", "v3_data_status", "v4_turn_log_warnings"]);
 
 		// 幂等：二次调用不再执行任何迁移
 		const second = migrate(db);
@@ -47,6 +47,9 @@ test("migrate 首次应用 v1+v2+v3，重复调用幂等（无副作用、返回
 		assert.ok(npcCols.includes("current_location"), "npcs.current_location 应存在");
 		const eventCols = (db.prepare("PRAGMA table_info(events)").all() as Array<{ name: string }>).map((c) => c.name);
 		assert.ok(eventCols.includes("location_id"), "events.location_id 应存在");
+		// v4 turn_log.warnings 补列
+		const turnLogCols = (db.prepare("PRAGMA table_info(turn_log)").all() as Array<{ name: string }>).map((c) => c.name);
+		assert.ok(turnLogCols.includes("warnings"), "turn_log.warnings 应存在");
 		// snapshots 不在 story.db（§3.1：独立 snapshots.db）
 		assert.ok(!tables.includes("snapshots"), "snapshots 表不应存在于 story.db");
 	} finally {
@@ -64,7 +67,7 @@ test("migrate 注册额外命名迁移：仅执行未应用的，且顺序在 co
 			up: (d) => d.exec("CREATE TABLE IF NOT EXISTS card_pack_v1 (id INTEGER PRIMARY KEY, note TEXT)"),
 		};
 		const applied = migrate(db, [extra]);
-		assert.deepEqual(applied, ["v1_core_schema", "v2_spatial_primitives", "v3_data_status", "card_pack_v1"]);
+		assert.deepEqual(applied, ["v1_core_schema", "v2_spatial_primitives", "v3_data_status", "v4_turn_log_warnings", "card_pack_v1"]);
 		assert.ok(hasMigration(db, "card_pack_v1"));
 
 		// 再次执行（含同额外迁移）不再应用任何

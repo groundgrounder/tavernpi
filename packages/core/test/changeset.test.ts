@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { cleanupTempDir, makeTempDir } from "./helpers.ts";
 import { openStoryDb, type StoryDb } from "../src/db/story-db.ts";
 import { DEFAULT_STORY_CLOCK } from "../src/db/types.ts";
-import { applyChangeset, changesetZodSchema, isReservedWorldStateKey, validateChangesetSemantics, type Changeset } from "../src/pipeline/changeset.ts";
+import { applyChangeset, changesetZodSchema, filterConflictingItems, isReservedWorldStateKey, validateChangesetSemantics, type Changeset } from "../src/pipeline/changeset.ts";
 
 function openTempStory(dir: string): StoryDb {
 	return openStoryDb(join(dir, "story.db"));
@@ -74,14 +74,18 @@ test("validateChangesetSemantics：未知地点 / 未知 npc / 时间倒流 / �
 		});
 		const problems = validateChangesetSemantics(story, cs);
 		assert.ok(problems.length >= 7, `应收集全部问题（实际 ${problems.length}）`);
-		assert.ok(problems.some((p) => p.includes("不存在的地方")), "未知地点");
-		assert.ok(problems.some((p) => p.includes("引用不存在的 NPC #999")), "subject 引用未知 npc");
-		assert.ok(problems.some((p) => p.includes("subject 格式非法")), "subject 格式非法");
-		assert.ok(problems.some((p) => p.includes("npc_updates.npc_id 不存在")), "npc_id 未知");
-		assert.ok(problems.some((p) => p.includes("other_npc_id 不存在")), "other_npc_id 未知");
-		assert.ok(problems.some((p) => p.includes("早于当前故事时间")), "时间倒流");
-		assert.ok(problems.some((p) => p.includes("保留键")), "player_location 保留键");
-		assert.ok(problems.some((p) => p.includes("phase_end.name")), "phase_end 未匹配");
+		assert.ok(problems.some((p) => p.message.includes("不存在的地方")), "未知地点");
+		assert.ok(problems.some((p) => p.message.includes("引用不存在的 NPC #999")), "subject 引用未知 npc");
+		assert.ok(problems.some((p) => p.message.includes("subject 格式非法")), "subject 格式非法");
+		assert.ok(problems.some((p) => p.message.includes("npc_updates.npc_id 不存在")), "npc_id 未知");
+		assert.ok(problems.some((p) => p.message.includes("other_npc_id 不存在")), "other_npc_id 未知");
+		assert.ok(problems.some((p) => p.message.includes("早于当前故事时间")), "时间倒流");
+		assert.ok(problems.some((p) => p.message.includes("保留键")), "player_location 保留键");
+		assert.ok(problems.some((p) => p.message.includes("phase_end.name")), "phase_end 未匹配");
+		// per-item 粒度：item 是变更集内路径标识
+		assert.ok(problems.some((p) => p.item === "events[0]"), "events[0] 路径标识");
+		assert.ok(problems.some((p) => p.item === "npc_updates[0].relations[0]"), "嵌套关系路径标识");
+		assert.ok(problems.some((p) => p.item === "time_advance"), "顶层字段路径标识");
 		story.close();
 	} finally {
 		cleanupTempDir(dir);
@@ -117,7 +121,7 @@ test("validateChangesetSemantics：sys_ 内核保留键禁写（编排器簿记�
 			world_state: [{ key: "sys_npc_offscreen_last_turn:1", value: "5" }],
 		});
 		const problems = validateChangesetSemantics(story, cs);
-		assert.ok(problems.some((p) => p.includes("sys_")), "sys_ 前缀键应被拒");
+		assert.ok(problems.some((p) => p.message.includes("sys_")), "sys_ 前缀键应被拒");
 		// isReservedWorldStateKey 判定
 		assert.equal(isReservedWorldStateKey("sys_npc_offscreen_last_turn:3"), true);
 		assert.equal(isReservedWorldStateKey("player_location"), true);
@@ -262,6 +266,101 @@ test("applyChangeset：语义校验失败 → 抛错且零写入（原子性）"
 		assert.equal(story.reader.listLocations().length, locationsBefore, "locations 零写入");
 		assert.equal(story.reader.listTimeLog().length, 0, "time_log 零写入");
 		assert.equal(story.reader.getClock()?.current_time, DEFAULT_STORY_CLOCK.current_time, "clock 未动");
+		story.close();
+	} finally {
+		cleanupTempDir(dir);
+	}
+});
+
+// ---------------------------------------------------------------------------
+// filterConflictingItems（§6.3 strictDrop：硬冲突项剔除，其余照落）
+// ---------------------------------------------------------------------------
+
+test("filterConflictingItems：按索引剔除数组元素并重排，顶层字段整体剔除", () => {
+	const dir = makeTempDir();
+	try {
+		const story = openTempStory(dir);
+		seedStory(story);
+		const cs = changesetZodSchema.parse({
+			events: [
+				{ summary: "好事件1" },
+				{ summary: "坏事件（未知地点）", location_name: "不存在的地方" },
+				{ summary: "好事件2" },
+				{ summary: "坏事件2（未知地点）", location_name: "又不存在" },
+			],
+			location_moves: [{ subject: "player", to_location_name: "王城" }],
+			time_advance: { to_time: "0000-00-30", span_note: "倒流" }, // 顶层字段问题（早于当前 0000-01-01）
+			world_state: [{ key: "weather", value: "晴" }],
+		});
+		const problems = validateChangesetSemantics(story, cs);
+		assert.ok(problems.some((p) => p.item === "events[1]"));
+		assert.ok(problems.some((p) => p.item === "events[3]"));
+		assert.ok(problems.some((p) => p.item === "time_advance"));
+
+		const { filtered, dropped } = filterConflictingItems(cs, problems);
+		// 剔除 events[1]/events[3]，保留 events[0]/events[2] 并重排
+		assert.deepEqual(
+			filtered.events.map((e) => e.summary),
+			["好事件1", "好事件2"],
+		);
+		assert.equal(filtered.time_advance, undefined, "time_advance 顶层字段整体剔除");
+		assert.equal(filtered.location_moves.length, 1, "无问题字段保留");
+		assert.equal(filtered.world_state.length, 1, "无问题字段保留");
+		// dropped 含被剔除项
+		assert.deepEqual(
+			dropped.map((d) => d.item).sort(),
+			["events[1]", "events[3]", "time_advance"].sort(),
+		);
+		// 入参未被修改（浅拷贝语义）
+		assert.equal(cs.events.length, 4);
+		assert.ok(cs.time_advance !== undefined);
+
+		// 剔除后的变更集应通过校验并可应用
+		assert.deepEqual(validateChangesetSemantics(story, filtered), []);
+		const summary = applyChangeset(story, filtered, { turnSeq: 1 });
+		assert.equal(summary.events, 2);
+		assert.equal(summary.timeAdvanced, false, "time_advance 已剔除");
+		story.close();
+	} finally {
+		cleanupTempDir(dir);
+	}
+});
+
+test("filterConflictingItems：npc_updates 嵌套子数组按元素剔除（父元素保留）", () => {
+	const dir = makeTempDir();
+	try {
+		const story = openTempStory(dir);
+		const { rodId } = seedStory(story);
+		const cs = changesetZodSchema.parse({
+			npc_updates: [
+				{
+					npc_id: rodId,
+					memories: [{ kind: "event", content: "好记忆" }],
+					relations: [
+						{ other_npc_id: 999, disposition: 0 }, // 坏关系（未知 NPC）
+						{ other_npc_id: rodId, disposition: 50 },
+					],
+				},
+			],
+		});
+		const problems = validateChangesetSemantics(story, cs);
+		assert.ok(problems.some((p) => p.item === "npc_updates[0].relations[0]"));
+
+		const { filtered, dropped } = filterConflictingItems(cs, problems);
+		// 父元素保留，坏关系被剔除
+		assert.equal(filtered.npc_updates.length, 1);
+		assert.equal(filtered.npc_updates[0]!.memories?.length, 1, "好记忆保留");
+		assert.deepEqual(
+			filtered.npc_updates[0]!.relations?.map((r) => r.other_npc_id),
+			[rodId],
+			"坏关系剔除后重排",
+		);
+		assert.deepEqual(dropped.map((d) => d.item), ["npc_updates[0].relations[0]"]);
+		// 剔除后通过校验并可应用
+		assert.deepEqual(validateChangesetSemantics(story, filtered), []);
+		const summary = applyChangeset(story, filtered, { turnSeq: 1 });
+		assert.equal(summary.npcUpdates, 1);
+		assert.equal(story.reader.getNpc(rodId).relations.length, 1);
 		story.close();
 	} finally {
 		cleanupTempDir(dir);

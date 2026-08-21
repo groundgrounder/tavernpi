@@ -1,10 +1,16 @@
 // Migration 框架（§5.0 schema 版本化的底座）。
-// core schema 是命名迁移序列（v1 基础 schema → v2 空间基元 → v3 data_status）；卡包 schema.sql
-// 后续以「注册额外命名 migration」接入，与 core 迁移同表（schema_migrations）追踪，保证幂等与顺序。
-// 既有旧库（已记录 v1/v2 迁移）open 后原地升后续版本；新库 v1→v2→v3 顺序应用直达当前版本。
+// core schema 是命名迁移序列（v1 基础 schema → v2 空间基元 → v3 data_status → v4 turn_log.warnings）；
+// 卡包 schema.sql 后续以「注册额外命名 migration」接入，与 core 迁移同表（schema_migrations）追踪，
+// 保证幂等与顺序。既有旧库 open 后原地升后续版本；新库顺序应用直达当前版本。
 
 import { DatabaseSync } from "node:sqlite";
-import { CORE_SCHEMA_SQL, CORE_V2_ALTERS, CORE_V2_SPATIAL_SQL, CORE_V3_DATA_STATUS_SQL } from "./schema.ts";
+import {
+	CORE_SCHEMA_SQL,
+	CORE_V2_ALTERS,
+	CORE_V2_SPATIAL_SQL,
+	CORE_V3_DATA_STATUS_SQL,
+	CORE_V4_TURN_LOG_WARNINGS_SQL,
+} from "./schema.ts";
 
 export interface Migration {
 	/** 唯一名称（schema_migrations.name）。同名重复注册会被跳过。 */
@@ -28,7 +34,7 @@ function columnExists(db: DatabaseSync, table: string, column: string): boolean 
 	return cols.some((c) => c.name === column);
 }
 
-/** core 内置迁移。v1 = §5.1 基础 schema；v2 = 空间基元；v3 = data_status（§6.1 失败路径持久化）。 */
+/** core 内置迁移。v1 = §5.1 基础 schema；v2 = 空间基元；v3 = data_status；v4 = turn_log.warnings（§6.3 留痕）。 */
 export const CORE_MIGRATIONS: Migration[] = [
 	{ name: "v1_core_schema", up: (db) => db.exec(CORE_SCHEMA_SQL) },
 	{
@@ -44,6 +50,14 @@ export const CORE_MIGRATIONS: Migration[] = [
 		},
 	},
 	{ name: "v3_data_status", up: (db) => db.exec(CORE_V3_DATA_STATUS_SQL) },
+	{
+		name: "v4_turn_log_warnings",
+		up: (db) => {
+			if (!columnExists(db, "turn_log", "warnings")) {
+				db.exec(CORE_V4_TURN_LOG_WARNINGS_SQL);
+			}
+		},
+	},
 ];
 
 /**

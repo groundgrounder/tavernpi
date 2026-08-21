@@ -125,6 +125,21 @@ test("recordDataStatus：缺 turnSeq 运行时抛错（turn_seq 纪律覆盖 dat
 	}
 });
 
+test("setTurnLogWarnings：缺 turnSeq 运行时抛错（turn_seq 纪律覆盖警告后补写）", () => {
+	const dir = makeTempDir();
+	try {
+		const story = openTempStory(dir);
+		const writer = story.writer as unknown as {
+			setTurnLogWarnings: (turnSeq?: number, warnings?: string) => unknown;
+		};
+		assert.throws(() => writer.setTurnLogWarnings(undefined, "x"), /turn_seq 纪律/);
+		assert.throws(() => writer.setTurnLogWarnings(-1, "x"), /turn_seq 纪律/);
+		story.close();
+	} finally {
+		cleanupTempDir(dir);
+	}
+});
+
 test("写入后可读回：events / time_log / world_state / npc 复合 / turn_log / directives", () => {
 	const dir = makeTempDir();
 	try {
@@ -188,6 +203,19 @@ test("写入后可读回：events / time_log / world_state / npc 复合 / turn_l
 			story.writer.recordTurnLog({ turnSeq: 2, sessionEntryId: "x", userInput: "y", narrativeText: "z" }),
 		);
 		assert.equal(story.reader.getTurnLog(2).length, 1);
+
+		// turn_log.warnings（v4）：不传为 NULL；后补写经 setTurnLogWarnings
+		story.writer.recordTurnLog({
+			turnSeq: 3,
+			sessionEntryId: "entry-8",
+			userInput: "再推门",
+			narrativeText: "他又推开了门。",
+			warnings: "记录时即带留痕",
+		});
+		assert.equal(story.reader.getTurnLog(3)[0]?.warnings, "记录时即带留痕");
+		story.writer.setTurnLogWarnings(2, "轻检后补写留痕");
+		assert.equal(story.reader.getTurnLog(2)[0]?.warnings, "轻检后补写留痕");
+		assert.equal(story.reader.getTurnLog(3)[0]?.warnings, "记录时即带留痕", "setTurnLogWarnings 只改目标轮");
 
 		// directives status 封闭枚举
 		const d = story.writer.insertDirective({ turnSeq: 2, content: "主角必须活下来" });

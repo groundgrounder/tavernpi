@@ -130,8 +130,14 @@ function parseSubjectName(subject: string): SubjectRef {
 	return "invalid";
 }
 
+/** 变更集语义校验问题：item = 变更集内路径标识（如 `events[2]`、`npc_updates[1].memories[0]`、`time_advance`）。 */
+export interface ChangesetProblem {
+	item: string;
+	message: string;
+}
+
 /**
- * 语义校验：收集全部问题（不抛）。覆盖：
+ * 语义校验：收集全部问题（不抛，per-item 粒度）。覆盖：
  * - 地点名可解析性：注册表 ∪ 本变更集 new_locations 构成可解析集；events.location_name /
  *   location_moves.to_location_name / new_npcs.location_name / new_locations.parent_name 必须可解析；
  * - NPC 存在性：npc_updates.npc_id / relations.other_npc_id / location_moves subject='npc:<id>'；
@@ -139,8 +145,8 @@ function parseSubjectName(subject: string): SubjectRef {
  * - world_state 禁写内核保留键（player_location 或 sys_ 前缀，见 isReservedWorldStateKey）；
  * - phase_end.name 必须匹配一个 ended_turn IS NULL 的 phase。
  */
-export function validateChangesetSemantics(storyDb: StoryDb, cs: Changeset): string[] {
-	const problems: string[] = [];
+export function validateChangesetSemantics(storyDb: StoryDb, cs: Changeset): ChangesetProblem[] {
+	const problems: ChangesetProblem[] = [];
 
 	const registeredLocations = new Set(storyDb.reader.listLocations().map((l) => l.name));
 	const resolvableLocations = new Set([...registeredLocations, ...cs.new_locations.map((l) => l.name)]);
@@ -148,72 +154,172 @@ export function validateChangesetSemantics(storyDb: StoryDb, cs: Changeset): str
 
 	const registeredNpcs = new Set(storyDb.reader.listNpcs().map((n) => n.id));
 
-	for (const ev of cs.events) {
+	for (const [i, ev] of cs.events.entries()) {
 		if (ev.location_name !== undefined && !hasLocation(ev.location_name)) {
-			problems.push(
-				`events.location_name 未登记且未在本变更集 new_locations 中: ${JSON.stringify(ev.location_name)}`,
-			);
+			problems.push({
+				item: `events[${i}]`,
+				message: `events.location_name 未登记且未在本变更集 new_locations 中: ${JSON.stringify(ev.location_name)}`,
+			});
 		}
 	}
-	for (const move of cs.location_moves) {
+	for (const [i, move] of cs.location_moves.entries()) {
 		if (!hasLocation(move.to_location_name)) {
-			problems.push(
-				`location_moves.to_location_name 未登记且未在本变更集 new_locations 中: ${JSON.stringify(move.to_location_name)}`,
-			);
+			problems.push({
+				item: `location_moves[${i}]`,
+				message: `location_moves.to_location_name 未登记且未在本变更集 new_locations 中: ${JSON.stringify(move.to_location_name)}`,
+			});
 		}
 		const parsed = parseSubjectName(move.subject);
 		if (parsed === "invalid") {
-			problems.push(`location_moves.subject 格式非法: ${JSON.stringify(move.subject)}（应为 'player' 或 'npc:<id>'）`);
+			problems.push({
+				item: `location_moves[${i}]`,
+				message: `location_moves.subject 格式非法: ${JSON.stringify(move.subject)}（应为 'player' 或 'npc:<id>'）`,
+			});
 		} else if (parsed.kind === "npc" && !registeredNpcs.has(parsed.npcId)) {
-			problems.push(`location_moves.subject 引用不存在的 NPC #${parsed.npcId}`);
+			problems.push({
+				item: `location_moves[${i}]`,
+				message: `location_moves.subject 引用不存在的 NPC #${parsed.npcId}`,
+			});
 		}
 	}
-	for (const npc of cs.new_npcs) {
+	for (const [i, npc] of cs.new_npcs.entries()) {
 		if (npc.location_name !== undefined && !hasLocation(npc.location_name)) {
-			problems.push(
-				`new_npcs.location_name 未登记且未在本变更集 new_locations 中: ${JSON.stringify(npc.location_name)}`,
-			);
+			problems.push({
+				item: `new_npcs[${i}]`,
+				message: `new_npcs.location_name 未登记且未在本变更集 new_locations 中: ${JSON.stringify(npc.location_name)}`,
+			});
 		}
 	}
-	for (const loc of cs.new_locations) {
+	for (const [i, loc] of cs.new_locations.entries()) {
 		if (loc.parent_name !== undefined && !hasLocation(loc.parent_name)) {
-			problems.push(
-				`new_locations.parent_name 未登记且未在本变更集 new_locations 中: ${JSON.stringify(loc.parent_name)}`,
-			);
+			problems.push({
+				item: `new_locations[${i}]`,
+				message: `new_locations.parent_name 未登记且未在本变更集 new_locations 中: ${JSON.stringify(loc.parent_name)}`,
+			});
 		}
 	}
-	for (const update of cs.npc_updates) {
+	for (const [i, update] of cs.npc_updates.entries()) {
 		if (!registeredNpcs.has(update.npc_id)) {
-			problems.push(`npc_updates.npc_id 不存在: #${update.npc_id}`);
+			problems.push({ item: `npc_updates[${i}]`, message: `npc_updates.npc_id 不存在: #${update.npc_id}` });
 		}
-		for (const rel of update.relations ?? []) {
+		for (const [j, rel] of (update.relations ?? []).entries()) {
 			if (!registeredNpcs.has(rel.other_npc_id)) {
-				problems.push(`npc_updates.relations.other_npc_id 不存在: #${rel.other_npc_id}`);
+				problems.push({
+					item: `npc_updates[${i}].relations[${j}]`,
+					message: `npc_updates.relations.other_npc_id 不存在: #${rel.other_npc_id}`,
+				});
 			}
 		}
 	}
 	if (cs.time_advance !== undefined) {
 		const clock = storyDb.reader.getClock();
 		if (clock !== undefined && cs.time_advance.to_time < clock.current_time) {
-			problems.push(
-				`time_advance.to_time 早于当前故事时间: ${JSON.stringify(cs.time_advance.to_time)} < ${JSON.stringify(clock.current_time)}（字符串字典序；ISO 日期前提）`,
-			);
+			problems.push({
+				item: "time_advance",
+				message: `time_advance.to_time 早于当前故事时间: ${JSON.stringify(cs.time_advance.to_time)} < ${JSON.stringify(clock.current_time)}（字符串字典序；ISO 日期前提）`,
+			});
 		}
 	}
-	for (const w of cs.world_state) {
+	for (const [i, w] of cs.world_state.entries()) {
 		if (isReservedWorldStateKey(w.key)) {
-			problems.push(
-				`world_state.key 是内核保留键（player_location 或 sys_ 前缀），data subagent 禁写: ${JSON.stringify(w.key)}`,
-			);
+			problems.push({
+				item: `world_state[${i}]`,
+				message: `world_state.key 是内核保留键（player_location 或 sys_ 前缀），data subagent 禁写: ${JSON.stringify(w.key)}`,
+			});
 		}
 	}
 	if (cs.phase_end !== undefined) {
 		const active = storyDb.reader.listPhases().filter((p) => p.ended_turn === null);
 		if (!active.some((p) => p.name === cs.phase_end!.name)) {
-			problems.push(`phase_end.name 不匹配任何未结束的 phase: ${JSON.stringify(cs.phase_end.name)}`);
+			problems.push({
+				item: "phase_end",
+				message: `phase_end.name 不匹配任何未结束的 phase: ${JSON.stringify(cs.phase_end.name)}`,
+			});
 		}
 	}
 	return problems;
+}
+
+/** 解析问题 item 路径：`events[2]` → [{field:"events",index:2}]；`npc_updates[1].relations[0]` → 两级。 */
+function parseItemPath(item: string): Array<{ field: string; index?: number }> {
+	return item.split(".").map((segment) => {
+		const m = /^([A-Za-z_][A-Za-z0-9_]*)(?:\[(\d+)\])?$/.exec(segment);
+		return { field: m?.[1] ?? segment, index: m?.[2] === undefined ? undefined : Number(m[2]) };
+	});
+}
+
+/**
+ * 按问题 item 路径剔除冲突项（§6.3 放行轮 strictDrop：硬冲突项不落库只记录，其余照落）。
+ * - 顶层字段（time_advance / phase_start / phase_end）：整体剔除；
+ * - 数组字段元素（events[i] 等）：按索引剔除，剩余元素重排；
+ * - npc_updates[i].<memories|traits|relations>[j]：从该元素内剔除对应子项（父元素本身被剔除时子项剔除作废）。
+ * 返回剔除后的变更集（浅拷贝，不修改入参）与剔除清单。
+ */
+export function filterConflictingItems(
+	cs: Changeset,
+	problems: ChangesetProblem[],
+): { filtered: Changeset; dropped: ChangesetProblem[] } {
+	const dropped: ChangesetProblem[] = [];
+	const paths = new Map<string, Array<{ field: string; index?: number }>>();
+	for (const p of problems) paths.set(p.item, parseItemPath(p.item));
+
+	const filtered: Changeset = {
+		...cs,
+		events: [...cs.events],
+		location_moves: [...cs.location_moves],
+		new_locations: [...cs.new_locations],
+		new_npcs: [...cs.new_npcs],
+		npc_updates: [...cs.npc_updates],
+		world_state: [...cs.world_state],
+	};
+
+	// 顶层字段整体剔除
+	for (const field of ["time_advance", "phase_start", "phase_end"] as const) {
+		const flagging = problems.filter((p) => {
+			const path = paths.get(p.item);
+			return path !== undefined && path.length === 1 && path[0]!.field === field && path[0]!.index === undefined;
+		});
+		if (flagging.length > 0) {
+			(filtered as Record<string, unknown>)[field] = undefined;
+			dropped.push(...flagging);
+		}
+	}
+
+	// 数组字段元素剔除（含 npc_updates 嵌套子数组）
+	const arrayFields = ["events", "location_moves", "new_locations", "new_npcs", "npc_updates", "world_state"] as const;
+	for (const field of arrayFields) {
+		const arr = filtered[field] as Array<Record<string, unknown>>;
+		const dropIndices = new Set<number>();
+		const flagging: ChangesetProblem[] = [];
+		const nestedDrops = new Map<string, { parentIndex: number; subField: string; indices: Set<number> }>();
+
+		for (const p of problems) {
+			const path = paths.get(p.item);
+			if (path === undefined || path[0]!.field !== field || path[0]!.index === undefined) continue;
+			if (path.length === 1) {
+				dropIndices.add(path[0]!.index!);
+				flagging.push(p);
+			} else if (path[1]!.index !== undefined && Array.isArray(arr[path[0]!.index]?.[path[1]!.field])) {
+				const key = `${path[0]!.index}:${path[1]!.field}`;
+				const entry = nestedDrops.get(key) ?? { parentIndex: path[0]!.index, subField: path[1]!.field, indices: new Set<number>() };
+				entry.indices.add(path[1]!.index!);
+				nestedDrops.set(key, entry);
+				flagging.push(p);
+			}
+		}
+		// 子项剔除按下标降序（先删高位，低位不位移）
+		for (const entry of nestedDrops.values()) {
+			if (dropIndices.has(entry.parentIndex)) continue; // 父元素整体剔除 → 子项剔除作废
+			const sub = arr[entry.parentIndex]![entry.subField] as Array<unknown>;
+			for (const idx of [...entry.indices].sort((a, b) => b - a)) sub.splice(idx, 1);
+		}
+		if (dropIndices.size > 0) {
+			filtered[field] = arr.filter((_, i) => !dropIndices.has(i)) as never;
+		}
+		dropped.push(...flagging);
+	}
+
+	return { filtered, dropped };
 }
 
 export interface ApplySummary {
@@ -240,7 +346,7 @@ export function applyChangeset(
 ): ApplySummary {
 	const problems = validateChangesetSemantics(storyDb, cs);
 	if (problems.length > 0) {
-		throw new Error(`变更集校验失败（${problems.length} 个问题）:\n${problems.map((p) => `- ${p}`).join("\n")}`);
+		throw new Error(`变更集校验失败（${problems.length} 个问题）:\n${problems.map((p) => `- ${p.item}: ${p.message}`).join("\n")}`);
 	}
 
 	const writer = storyDb.writer;

@@ -195,13 +195,13 @@ export class DbReader {
 		if (turnSeq !== undefined) {
 			return this.db
 				.prepare(
-					"SELECT turn_seq, session_entry_id, user_input, narrative_text, raw_text FROM turn_log WHERE turn_seq = ?",
+					"SELECT turn_seq, session_entry_id, user_input, narrative_text, raw_text, warnings FROM turn_log WHERE turn_seq = ?",
 				)
 				.all(turnSeq) as unknown as TurnLogRow[];
 		}
 		return this.db
 			.prepare(
-				"SELECT turn_seq, session_entry_id, user_input, narrative_text, raw_text FROM turn_log ORDER BY turn_seq",
+				"SELECT turn_seq, session_entry_id, user_input, narrative_text, raw_text, warnings FROM turn_log ORDER BY turn_seq",
 			)
 			.all() as unknown as TurnLogRow[];
 	}
