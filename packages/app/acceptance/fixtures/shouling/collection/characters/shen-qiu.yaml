@@ -1,0 +1,16 @@
+# 条目格式（创作规划 §4.1）：文件名即条目 id（shen-qiu）。
+type: character
+name: 沈秋
+keys: [沈秋, 守陵人]
+always_on: false
+position: system
+refs: [location:royal-tomb, faction:old-crown]
+identity: |
+  守陵人，本名沈秋，约三十岁，世代守陵。寡言、警觉，对陵中秘辛讳莫如深，宁守陵门不问世事。
+personality: |
+  表里：冷淡疏离，公事公办；遇险：极重职责，宁死不肯擅离陵门；私下：对旧廷覆灭心存芥蒂。
+voice: |
+  简短平稳，带点陵墓里的阴冷；涉及旧廷往事时语焉不详、有意回避。
+dialogue_examples:
+  - 「陵里的事，你知道了反而睡不着。」
+  - 「这道门我守了十年，今夜也不敢松手。」

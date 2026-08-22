@@ -162,6 +162,16 @@ export class DbReader {
 			.all() as unknown as NpcRow[];
 	}
 
+	/** 按 card_ref 精确查 NPC（卡包条目 seed 幂等键：card_ref = 包名:条目id，已存在即跳过不覆盖）。 */
+	findNpcByCardRef(cardRef: string): NpcRow | undefined {
+		return this.db
+			.prepare(
+				`SELECT n.id, n.name, n.card_ref, n.status, n.current_location, loc.name AS current_location_name
+				 FROM npcs n LEFT JOIN locations loc ON loc.id = n.current_location WHERE n.card_ref = ?`,
+			)
+			.get(cardRef) as NpcRow | undefined;
+	}
+
 	/** NPC 复合读：基本信息（含当前位置）+ 特征 + 记忆（按 salience 降序）+ 关系（双向）。 */
 	getNpc(npcId: number): NpcComposite {
 		const npc = this.db

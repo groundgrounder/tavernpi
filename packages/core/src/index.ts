@@ -222,3 +222,35 @@ export {
 	type StylizeRuntimeOptions,
 	type TurnResult,
 } from "./pipeline/runtime.ts";
+
+// 卡包系统（§4 世界包：加载 / 匹配注入 / seed / mtime 缓存热更新；§4.1 M5 定稿）
+export { loadPack, loadPacks, KERNEL_TABLE_WHITELIST } from "./pack/loader.ts";
+export { PackCache } from "./pack/cache.ts";
+export {
+	buildCollectionInjection,
+	estimateTokens,
+	type CollectionInjectionOptions,
+	type CollectionInjectionResult,
+} from "./pack/matcher.ts";
+export { packMigrations } from "./pack/seed.ts";
+export {
+	PackLoadError,
+	ENTRY_ID_RE,
+	ENTRY_POSITIONS,
+	ENTRY_TYPES,
+	PACK_NAME_RE,
+	type CollectionEntry,
+	type EntryPosition,
+	type EntryType,
+	type PackIssue,
+	type StoryMeta,
+	type WorldPack,
+} from "./pack/types.ts";
+
+// 故事创建（§4.1 M5：createStory——卡包校验 → SQL+seed 迁移 → story.yaml 消费 → 开场白首轮 → story.meta.json）
+export {
+	createStory,
+	type CreateStoryOptions,
+	type CreateStoryResult,
+	type StoryMetaFile,
+} from "./story.ts";

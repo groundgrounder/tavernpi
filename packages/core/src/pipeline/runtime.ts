@@ -1,13 +1,18 @@
 // StoryRuntime 编排器（创作规划 §10.2 对外 API 面；§7 M3/M4 验收的运行时核心）。
 // 接线（app/CLI 只消费 core API）：
 //   SessionManager ↔ StoryDb ↔ SnapshotsDb ↔ createSnapshotHooks（导航原子恢复）
-//   ↔ 主叙事 AgentSession（零工具 + before_agent_start 每轮注入 DB 摘要 + 预演/场景卡/统筹/打回批注）
+//   ↔ 主叙事 AgentSession（零工具 + before_agent_start 每轮注入 DB 摘要 + 预演/场景卡/统筹/打回批注
+//      + 卡包检索注入 {{collection_injection}}，§4.1 M5）
 //   ↔ npc 阶段（§6.2：场景规划 → 在场预演 ×N 并行 + 离线批量推演 → 主叙事 → data）
 //   ↔ story 阶段（§6.3：场景分析最前 → 轻检/打回循环 → 全统筹）
 //   ↔ stylize（§6.4：可选，审查通过后、data 前；只改文风不动事实）
 //   ↔ runDataStage（data subagent：抽取落库，唯一写者，§6.1）
 //     预演产物注入主叙事隐藏批注，离线 delta 交 data 转写落库——npc 层永不直接写库，
 //     只由编排器在 data.ok 后直写 sys_ 簿记键（同 clock 例外精神）。
+//
+// M5 卡包接线（§4.1）：StoryRuntimeOptions.packs 缺省 undefined = M2–M4 形态（无注入）；
+// 提供时每轮 before_agent_start 经 renderNarratorPrompt 注入检索式命中条目（system 前部 / recent 后部），
+// cache 回退/预算裁减/未知钉警告走 onWarning + 事件流，TurnResult.collection 留痕本轮注入。
 //
 // 关键接线决策（与 M1 一致，文件头复述）：
 // 1. 快照绑定本轮 leaf（最终 assistant entry），与 turn_log 同一 id。pi navigateTree 语义：
@@ -31,6 +36,8 @@
 // - 恢复（restore）用新 StoryDb 实例替换，旧连接被关闭；任何长期持有 storyDb 的闭包
 //   （除 getter）都会在恢复后读到已关闭连接。
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
 	createAgentSession,
 	DefaultResourceLoader,
@@ -49,6 +56,8 @@ import { takeSnapshot } from "../snapshot/snapshots-db.ts";
 import type { TavernModels, TavernSettings } from "../settings.ts";
 import { loadPrompt, renderPlaceholders, type PromptLayerDirs } from "../prompts/loader.ts";
 import type { SubagentRunOptions } from "../subagent/runtime.ts";
+import { buildCollectionInjection } from "../pack/matcher.ts";
+import type { PackCache } from "../pack/cache.ts";
 import { runDataStage, type DataStageOptions, type DataStageOutcome } from "./data-stage.ts";
 import {
 	computeScenePlan,
@@ -83,6 +92,107 @@ export function computeNextTurnSeq(storyDb: StoryDb): number {
 	const logs = storyDb.reader.getTurnLog();
 	const last = logs.at(-1);
 	return last ? last.turn_seq + 1 : 1;
+}
+
+// ---------------------------------------------------------------------------
+// 主叙事系统提示渲染（before_agent_start 处理函数体；独立导出便于单测确定性断言，无需模型/网络）
+// ---------------------------------------------------------------------------
+
+/** 主叙事系统提示渲染依赖（§4.1 检索式注入 + §6.0 上下文全注入）。 */
+export interface NarratorPromptDeps {
+	/** narrator 模板（含 {{db_summary}}/{{collection_injection}} 等占位符）。 */
+	template: string;
+	/** 当前故事 DB（getter：恢复/回溯替换实例后读取始终命中最新连接）。 */
+	storyDb: () => StoryDb;
+	/** 卡包检索注入选项（缺省 = 无注入，占位符渲染「（无世界包注入）」）。 */
+	packs?: StoryRuntimeOptions["packs"];
+	/** 本轮玩家输入（runTurn 置入；打回重写循环保持同一输入，注入扫描文本不变）。 */
+	currentInput: () => string;
+	/** 当前 turnSeq（卡包警告事件流留痕用）。 */
+	currentTurnSeq: () => number;
+	pendingRehearsals: () => string | undefined;
+	pendingSceneCard: () => SceneCard | undefined;
+	pendingOverseeNote: () => string | undefined;
+	pendingRevision: () => string | undefined;
+	onWarning?: (m: string) => void;
+	eventLog?: PipelineEventLog;
+}
+
+export interface NarratorPromptResult {
+	/** 渲染完成的当轮系统提示全文。 */
+	rendered: string;
+	/** 命中注入条目标识（包名:type:id；含截断注入的条目）。 */
+	collectionInjected: string[];
+	/** 注入警告（缓存回退 / 预算裁减 / 未知钉）。 */
+	collectionWarnings: string[];
+}
+
+/**
+ * 渲染当轮主叙事系统提示。before_agent_start 钩子体——独立函数便于单测确定性断言
+ * （packs 注入/警告上抛无需真实模型与网络）。
+ * 卡包注入（§4.1）：cache.getPacks() 取当前 packs → buildCollectionInjection
+ * （input + 上一轮 turn_log narrativeText 作为扫描文本；pinned 经 getter 每轮现取）→
+ * systemText 在前、recentText 在后拼入 {{collection_injection}}；cache 回退 / 预算裁减 /
+ * 未知钉警告走 onWarning + pipeline 事件流（role="pack"）。
+ */
+export function renderNarratorPrompt(deps: NarratorPromptDeps): NarratorPromptResult {
+	const injected: string[] = [];
+	const warnings: string[] = [];
+	let collectionText = "（无世界包注入）";
+
+	if (deps.packs !== undefined) {
+		const { packs, warnings: cacheWarnings } = deps.packs.cache.getPacks();
+		warnings.push(...cacheWarnings);
+		const lastTurn = deps.storyDb().reader.getTurnLog().at(-1);
+		const result = buildCollectionInjection(packs, {
+			input: deps.currentInput(),
+			recentNarrative: lastTurn?.narrative_text,
+			pinned: deps.packs.pinned?.(),
+			budgetTokens: deps.packs.budgetTokens,
+		});
+		injected.push(...result.injected);
+		warnings.push(...result.warnings);
+		const parts: string[] = [];
+		if (result.systemText !== "") parts.push(result.systemText);
+		if (result.recentText !== "") parts.push(result.recentText);
+		collectionText = parts.length > 0 ? parts.join("\n\n") : "（本轮无注入条目）";
+	}
+
+	// 注入警告（缓存回退 / 预算裁减 / 未知钉）走 onWarning + pipeline 事件流（§4.1）
+	for (const warning of warnings) {
+		deps.onWarning?.(`[卡包] ${warning}`);
+		deps.eventLog?.record({
+			ts: new Date().toISOString(),
+			turnSeq: deps.currentTurnSeq(),
+			role: "pack",
+			ok: false,
+			durationMs: 0,
+			error: warning,
+		});
+	}
+
+	const rendered = renderPlaceholders(deps.template, {
+		db_summary: renderDbSummary(deps.storyDb()),
+		npc_rehearsals: deps.pendingRehearsals() ?? "（本轮无在场 NPC 预演）",
+		scene_card: deps.pendingSceneCard()
+			? renderSceneCardForNarrator(deps.pendingSceneCard()!, deps.storyDb())
+			: "（无）",
+		oversee_note: deps.pendingOverseeNote() ?? "（无）",
+		revision_request: deps.pendingRevision() ?? "（无）",
+		collection_injection: collectionText,
+	}).text;
+
+	return { rendered, collectionInjected: injected, collectionWarnings: warnings };
+}
+
+/** story.meta.json 的 defaultStyle（世界包文风，§6.4 stylize 缺省 hint）；读不到返回 undefined。 */
+function readStoryMetaDefaultStyle(storyDir: string): string | undefined {
+	try {
+		const meta = JSON.parse(readFileSync(join(storyDir, "story.meta.json"), "utf8")) as { defaultStyle?: unknown };
+		return typeof meta.defaultStyle === "string" ? meta.defaultStyle : undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 /**
@@ -239,6 +349,15 @@ export interface StoryRuntimeOptions {
 	story?: StoryStageRuntimeOptions;
 	/** stylize 阶段（§6.4）。缺省关闭。 */
 	stylize?: StylizeRuntimeOptions;
+	/** 卡包检索注入（§4.1 M5；缺省 = M2–M4 形态，无注入，占位符渲染「（无世界包注入）」）。 */
+	packs?: {
+		/** 设定集热更新缓存（getPacks：mtime 变化重载，失败回退上次成功快照 + warning）。 */
+		cache: PackCache;
+		/** 手动钉（getter：CLI 会话级动态改）。写法 `包名:type:id`。 */
+		pinned?: () => string[];
+		/** token 预算（默认 1500，可按故事覆盖）。 */
+		budgetTokens?: number;
+	};
 	/** 系统提示渲染完成回调（§10.2 pipeline 可观测性）：before_agent_start 每次注入后调用，
 	 *  参数为渲染好的当轮系统提示全文（含 db_summary 与当轮预演/场景卡/统筹/打回批注）。观测钩子，不影响渲染语义。 */
 	onSystemPromptRender?: (rendered: string) => void;
@@ -275,6 +394,8 @@ export interface TurnResult {
 	stylize?: { applied: boolean; drift?: string[] };
 	/** 全统筹批注（§6.3；本轮触发则为 note，未触发字段缺省，触发但失败为 null）。 */
 	oversee?: OverseeNote | null;
+	/** 卡包检索注入报告（§4.1；packs 缺省时无此字段）。 */
+	collection?: { injected: string[]; warnings: string[] };
 }
 
 export interface StoryRuntime {
@@ -295,6 +416,10 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 	const npcOpts: NpcStageRuntimeOptions = { enabled: false, ...opts.npc };
 	const storyOpts: StoryStageRuntimeOptions = { enabled: false, ...opts.story };
 	const stylizeOpts: StylizeRuntimeOptions = { enabled: false, ...opts.stylize };
+	// stylize.styleHint 缺省值：未显式传入时读 story.meta.json 的 defaultStyle（§6.4 世界包文风）。
+	if (stylizeOpts.styleHint === undefined) {
+		stylizeOpts.styleHint = readStoryMetaDefaultStyle(storyState.storyDir);
+	}
 
 	const hooks = createSnapshotHooks({
 		snapshotsDb: storyState.snapshotsDb,
@@ -329,6 +454,11 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 	let pendingSceneCard: SceneCard | undefined;
 	let pendingOverseeNote: string | undefined;
 	let pendingRevision: string | undefined;
+	// 卡包检索注入输入/报告（§4.1）：输入由 runTurn 置入（重写循环保持同一输入）；报告在
+	// before_agent_start 每次渲染后暂存，供 TurnResult.collection（最后一次 prompt 的注入结果）。
+	let pendingCollectionInput: string | undefined;
+	let pendingCollectionTurnSeq = 0;
+	let pendingCollectionReport: TurnResult["collection"];
 
 	const extensionFactories: Array<(pi: ExtensionAPI) => void> = [
 		(pi) => {
@@ -339,20 +469,33 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 				hooks.sessionTree(event, ctx);
 			});
 			// 每轮注入通道：before_agent_start 每次 prompt 触发一次，整串替换当轮系统提示。
+			// 渲染逻辑收敛在 renderNarratorPrompt（独立导出，单测确定性覆盖）：
 			// renderPlaceholders 只替换已知占位符，其余模板原样保留。
 			// onSystemPromptRender：渲染完成回调（§10.2 可观测性），供验收/观测钩子读取注入内容。
+			// 卡包检索注入（§4.1）：packs 提供时每轮 cache.getPacks() + buildCollectionInjection，
+			// 注入报告暂存 pendingCollectionReport，供 TurnResult.collection（最后一次 prompt 的结果）。
 			pi.on("before_agent_start", () => {
-				const rendered = renderPlaceholders(narratorTemplate, {
-					db_summary: renderDbSummary(storyState.storyDb),
-					// npc 未启用时 pendingRehearsals 恒 undefined → 占位符渲染为「无在场 NPC 预演」
-					npc_rehearsals: pendingRehearsals ?? "（本轮无在场 NPC 预演）",
-					// story 未启用时 pendingSceneCard 恒 undefined → 渲染为「（无）」
-					scene_card: pendingSceneCard ? renderSceneCardForNarrator(pendingSceneCard, storyState.storyDb) : "（无）",
-					oversee_note: pendingOverseeNote ?? "（无）",
-					revision_request: pendingRevision ?? "（无）",
-				}).text;
-				opts.onSystemPromptRender?.(rendered);
-				return { systemPrompt: rendered };
+				const result = renderNarratorPrompt({
+					template: narratorTemplate,
+					storyDb: () => storyState.storyDb,
+					packs: opts.packs,
+					currentInput: () => pendingCollectionInput ?? "",
+					currentTurnSeq: () => pendingCollectionTurnSeq,
+					pendingRehearsals: () => pendingRehearsals,
+					pendingSceneCard: () => pendingSceneCard,
+					pendingOverseeNote: () => pendingOverseeNote,
+					pendingRevision: () => pendingRevision,
+					onWarning,
+					eventLog,
+				});
+				if (opts.packs !== undefined) {
+					pendingCollectionReport = {
+						injected: result.collectionInjected,
+						warnings: result.collectionWarnings,
+					};
+				}
+				opts.onSystemPromptRender?.(result.rendered);
+				return { systemPrompt: result.rendered };
 			});
 		},
 	];
@@ -401,6 +544,12 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 		}
 		const turnSeq = computeNextTurnSeq(storyState.storyDb);
 		const startedAt = Date.now();
+
+		// 卡包检索注入输入（§4.1）：runTurn 置入，before_agent_start 经 renderNarratorPrompt 消费；
+		// 打回重写循环保持同一输入（注入扫描文本不变）。
+		pendingCollectionInput = input;
+		pendingCollectionTurnSeq = turnSeq;
+		pendingCollectionReport = undefined;
 
 		// ---- story 阶段①：场景分析在最前，产出场景卡（npc 调度 / data 时间建议 / 轻检依据）----
 		let sceneCard: SceneCard | undefined;
@@ -691,6 +840,7 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 					: {}),
 				stylize: stylizeReport,
 				oversee: overseeNote,
+				collection: pendingCollectionReport,
 			};
 		} finally {
 			// turn 结束后复位：预演/场景卡/打回只属当轮，不泄漏到后续 prompt（下轮重新填充）。

@@ -1,0 +1,14 @@
+# 条目格式（创作规划 §4.1）：文件名即条目 id（old-crown）。
+type: faction
+name: 旧廷遗党
+keys: [旧廷, 遗党]
+always_on: false
+position: system
+refs: []
+overview: |
+  前朝覆灭后散落民间的旧吏、宫人与世袭武官组成的秘密联络网，以「旧例」为暗语，图谋重续旧朝香火。
+goals:
+  - 迎回流落在外的前朝遗孤
+  - 探明王陵秘辛，寻回先帝遗诏
+members:
+  - character:wu-zhuo

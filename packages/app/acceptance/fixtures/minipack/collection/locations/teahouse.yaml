@@ -1,0 +1,12 @@
+# 条目格式（创作规划 §4.1）：文件名即条目 id（teahouse）。
+type: location
+name: 城南茶肆
+keys: [茶肆]
+always_on: false
+position: recent
+refs: []
+overview: |
+  城南街角的二层茶肆，一楼散座，二楼雅间，是消息买卖、闲汉聚集之地。
+features:
+  - 二楼雅间：隔音尚可，常有生面孔谈事
+  - 柜台：阿青看柜，认得半个城的人

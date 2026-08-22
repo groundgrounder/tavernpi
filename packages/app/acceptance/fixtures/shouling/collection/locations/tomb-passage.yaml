@@ -1,0 +1,13 @@
+# 条目格式（创作规划 §4.1）：文件名即条目 id（tomb-passage）。
+type: location
+name: 墓道
+keys: [墓道]
+always_on: false
+position: recent
+refs: []
+parent: royal-tomb
+overview: |
+  连接陵门与玄宫的甬道，青砖砌壁，两侧壁龛点着长明灯。越往里走，空气越沉，隐约有铁链拖地的回响。
+features:
+  - 壁龛长明灯：灯油千年不竭，据说灯灭则陵门当关
+  - 青砖地面：砖缝间渗出潮气，足音回响不散
